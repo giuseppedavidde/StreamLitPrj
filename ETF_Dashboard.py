@@ -1,9 +1,11 @@
-import streamlit as st
-import pandas as pd
-from modules import general_utils, stock_utils
+from modules import general_utils
+from modules.general_utils import glob, os, np, pd, dt, go, sp, yf
+from modules import stock_utils
 import warnings
-import os
 from datetime import datetime as dtm
+import requests
+
+import streamlit as st
 
 st.set_page_config(page_title="ETF/Stock Evaluation Dashboard", layout="wide")
 st.title("ETF/Stock Evaluation Dashboard")
@@ -140,7 +142,6 @@ if isinstance(stock_under_test, pd.DataFrame):
     st.metric("Total Return (EUR)", f"{total_gain:,.2f}")
     st.metric("Total Return %", f"{(total_gain/invested_capital_invested)*100:.2f}%")
     # Pie charts for invested capital by category
-    import plotly.graph_objects as go
     def safe_create_pie_chart(labels, values, title_text):
         if not labels or not values or sum(values) == 0:
             st.info(f"No data to display for: {title_text}")
@@ -199,7 +200,6 @@ else:
     st.dataframe(stock_data_dca_values)
     # Plot price, MA200, OBV
     st.markdown("#### Stock Price, MA200, OBV")
-    import plotly.graph_objects as go
     dates = stock_data_dca_values.index
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates, y=stock_data_dca_values["stock_price"], mode="lines", name="Stock Price"))

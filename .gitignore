@@ -1,5 +1,4 @@
 modules/__pycache__/*.pyc
 FIR_Filter/*
-modules/__init__.py
 *.png
 
