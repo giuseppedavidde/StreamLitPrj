@@ -6,7 +6,7 @@ import pandas as pd
 ##Generic library to create plots
 import plotly.graph_objects as go
 import plotly.subplots as sp
-from ipywidgets import interactive, HBox, VBox, widgets, Layout, ToggleButton, fixed
+#from ipywidgets import interactive, HBox, VBox, widgets, Layout, ToggleButton, fixed
 
 ##Generic library to retrieve stock-Data
 import yfinance as yf
