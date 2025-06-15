@@ -13,22 +13,36 @@ st.caption("Analyze and visualize your ETF/Stock portfolio and DCA strategies in
 
 # --- File Upload Section ---
 st.sidebar.header("Portfolio Data Upload")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload your Portfolio CSV (My_Portfolio.csv)",
-    type=["csv"],
-    help="Upload your portfolio file with columns: Symbol, Category, Shares, Invested (USD), Invested (EUR), etc."
+portfolio_source = st.sidebar.radio(
+    "Portfolio Source:",
+    ["Upload CSV", "GitHub URL"],
+    index=0
 )
-
-if uploaded_file is not None:
-    df_portfolio = pd.read_csv(uploaded_file, sep=';')
+df_portfolio = None
+if portfolio_source == "Upload CSV":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload your Portfolio CSV (My_Portfolio.csv)",
+        type=["csv"],
+        help="Upload your portfolio file with columns: Symbol, Category, Shares, Invested (USD), Invested (EUR), etc."
+    )
+    if uploaded_file is not None:
+        df_portfolio = pd.read_csv(uploaded_file, sep=';')
 else:
+    github_url = st.sidebar.text_input("Paste GitHub raw CSV URL", value="")
+    if github_url:
+        try:
+            df_portfolio = pd.read_csv(github_url, sep=';')
+            st.success("Portfolio loaded from GitHub!")
+        except Exception as e:
+            st.error(f"Failed to load CSV from GitHub: {e}")
+if df_portfolio is None:
     # Fallback to default file for local dev
     default_path = os.path.join(os.path.dirname(__file__), "..", "Data_for_Analysis", "My_Portfolio.csv")
     if os.path.exists(default_path):
         st.info("No file uploaded. Using default local file for demonstration.")
         df_portfolio = pd.read_csv(default_path, sep=';')
     else:
-        st.warning("Please upload a portfolio CSV file to continue.")
+        st.warning("Please upload a portfolio CSV file or provide a GitHub URL to continue.")
         st.stop()
 
 # --- User Inputs ---
