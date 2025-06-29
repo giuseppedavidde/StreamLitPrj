@@ -6,6 +6,7 @@ import pandas as pd
 ##Generic library to create plots
 import plotly.graph_objects as go
 import plotly.subplots as sp
+from ipywidgets import interactive, HBox, VBox, widgets, Layout, ToggleButton, fixed
 
 ##Generic library to retrieve stock-Data
 import yfinance as yf
@@ -108,28 +109,25 @@ def get_stock_with_date_index_data(
     """
     full_date_range = pd.date_range(start=start_date, end=end_date, freq="D")
     try:
-        print(f"[DEBUG] Ticker: {getattr(stock_data, 'ticker', str(stock_data))}")
-        print(f"[DEBUG] Date range: {start_date} to {end_date}")
         if isinstance(stock_data, yf.Ticker):
             hist_data = stock_data.history(start=start_date, end=end_date)
-            print(f"[DEBUG] hist_data shape: {hist_data.shape}")
-            if hist_data.empty:
-                print("[ERROR] Yahoo Finance returned empty DataFrame for this ticker and date range.")
-                return pd.DataFrame(index=full_date_range, columns=["symbol","category","stock_price", "volume", "MA200", "OBV"]).assign(error="No data returned from Yahoo Finance")
-            hist_data = hist_data.reindex(full_date_range)
-            hist_data = hist_data.infer_objects()
-            hist_data.ffill(inplace=True)
+            hist_data.index = hist_data.index.strftime("%Y-%m-%d")
+            hist_data = hist_data.reindex(full_date_range.strftime("%Y-%m-%d"))
+            hist_data.infer_objects().ffill(inplace=True)
+
             hist_data_to_return = pd.DataFrame(
-                index=full_date_range,
+                index=full_date_range.strftime("%Y-%m-%d"),
                 columns=["symbol","category","stock_price", "volume", "MA200", "OBV"],
             )
             hist_data_to_return["stock_price"] = hist_data["Close"]
             hist_data_to_return["volume"] = hist_data["Volume"]
             hist_data_to_return["category"] = category
-            hist_data_to_return["symbol"] = getattr(stock_data, 'ticker', str(stock_data))
+            hist_data_to_return["symbol"] = stock_data.ticker
             hist_data_to_return["MA200"] = (
                 hist_data_to_return["stock_price"].rolling(window=ma_period).mean()
             )
+
+            # Calcolo dell'indicatore OBV
             hist_data_to_return["OBV"] = np.where(
                 hist_data_to_return["stock_price"].diff() > 0,  # type: ignore
                 hist_data_to_return["volume"],
@@ -138,20 +136,15 @@ def get_stock_with_date_index_data(
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', FutureWarning)
                 hist_data_to_return.ffill(inplace=True)
-            # Check for all-NaN in stock_price or MA200
-            if hist_data_to_return["stock_price"].isna().all() or hist_data_to_return["MA200"].isna().all():
-                print("[ERROR] All stock_price or MA200 values are NaN after processing.")
-                hist_data_to_return["error"] = "All stock_price or MA200 are NaN"
             return hist_data_to_return
         else:
             raise ValueError(f"stock_data must be a yf.Ticker object, got {type(stock_data)} instead.")
     except Exception as e:
-        print(f"[EXCEPTION] {e}")
+        print(f"Error: {e}")
         hist_data_to_return = pd.DataFrame(
             index=full_date_range.strftime("%Y-%m-%d"),
             columns=["symbol","stock_price", "volume", "MA200", "OBV"],
         )
-        hist_data_to_return["error"] = str(e)
         return hist_data_to_return
 
 def get_info_investment(
@@ -265,18 +258,13 @@ def get_best_investment_strategy(results):
     best_number_shares = 0
     best_return_value = 0
     best_market_value = 0
-    best_last_date_purchase = None
 
     for freq, result in results.items():
-        try:
-            average_cost = result["average_cost"].iloc[-1] if hasattr(result["average_cost"], 'iloc') else result["average_cost"][-1]
-            number_shares = result["total_shares"].iloc[-1] if hasattr(result["total_shares"], 'iloc') else result["total_shares"][-1]
-            last_date_purchase = result["purchase_dates"][-1] if isinstance(result["purchase_dates"], (list, np.ndarray, pd.Series)) else result["purchase_dates"]
-            final_return_value = result["daily_gain"].iloc[-1] if hasattr(result["daily_gain"], 'iloc') else result["daily_gain"][-1]
-            market_value = result["market_value"].iloc[-1] if hasattr(result["market_value"], 'iloc') else result["market_value"][-1]
-        except Exception as e:
-            print(f"Error processing frequency {freq}: {e}")
-            continue
+        average_cost = result["average_cost"].iloc[-1]
+        number_shares = result["total_shares"].iloc[-1]
+        last_date_purchase = result["purchase_dates"][-1]  ##It is a list
+        final_return_value = result["daily_gain"].iloc[-1]
+        market_value = result["market_value"].iloc[-1]
 
         if average_cost < best_average_cost:
             best_strategy = freq
@@ -285,14 +273,11 @@ def get_best_investment_strategy(results):
             best_last_date_purchase = last_date_purchase
             best_return_value = final_return_value
             best_market_value = market_value
-    if best_strategy is not None:
-        print(
-            f"The winning strategy is {best_strategy} with an average cost of {best_average_cost:.2f} , {best_number_shares:.2f} shares and last purchase on {best_last_date_purchase} with a return value of {best_return_value} USD."
-        )
-        print(f"The final market value at is : {best_market_value} USD")
-    else:
-        print("No valid strategy found.")
-    return (best_strategy, best_average_cost, best_number_shares, best_market_value, best_last_date_purchase)
+    print(
+        f"The winning strategy is {best_strategy} with an average cost of {best_average_cost:.2f} , {best_number_shares:.2f} shares and last purchase on {best_last_date_purchase} with a return value of {best_return_value} USD."
+    )
+    print(f"The final market value at is : {best_market_value} USD")
+    return (best_strategy, best_average_cost, best_number_shares, best_market_value)
 
 ##To be used in order to plot the stock behavior along two dates that you choose
 def plot_stock_data(ticker, stock_data, start_date, end_date):   
