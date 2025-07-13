@@ -279,9 +279,53 @@ if not GEMINI_API_KEY:
     elif "gemini_api_key" in st.session_state and st.session_state["gemini_api_key"]:
         GEMINI_API_KEY = st.session_state["gemini_api_key"]
 
-# Store chat history in session state
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+
+# System snippet for Gemini context
+SYSTEM_SNIPPET = (
+    "You are a financial markets expert specializing in options, stocks, and trading strategies. "
+    "Your role is to assist with analysis, education, and decision-making for retail and professional traders. "
+    "Always provide clear, actionable insights about option chains, volatility, risk management, and portfolio optimization. "
+    "If asked about a specific stock, focus on its options, technicals, and relevant market news. "
+    "Avoid general chit-chat and keep responses concise, practical, and focused on trading and investing topics."
+)
+
+# Chat session time tracking
+import datetime
+
+if "chat_time_begin" not in st.session_state:
+    st.session_state.chat_time_begin = datetime.datetime.now()
+if "chat_time_end" not in st.session_state:
+    st.session_state.chat_time_end = None
+
+# Store chat history in session state, always start with system snippet
+if "chat_history" not in st.session_state or not st.session_state.chat_history:
+    st.session_state.chat_history = [("system", SYSTEM_SNIPPET)]
+    st.session_state.chat_time_begin = datetime.datetime.now()
+    st.session_state.chat_time_end = None
+
+
+# LLM selector: Gemini or Ollama
+llm_choice = st.sidebar.selectbox(
+    "Choose LLM",
+    options=["Gemini", "Ollama"],
+    index=0,
+    help="Select which LLM to use for chat responses.",
+)
+
+# Ollama model selection (only shown if Ollama is selected)
+ollama_model = "llama2"
+if llm_choice == "Ollama":
+    ollama_model = st.sidebar.text_input(
+        "Ollama Model",
+        value="llama2",
+        help="Enter the name of the Ollama model you want to use (e.g., llama2, phi3, mistral, etc.)",
+    )
+
+# New Chat button
+if st.sidebar.button("New Chat", key="new_chat"):
+    st.session_state.chat_history = [("system", SYSTEM_SNIPPET)]
+    st.session_state.chat_time_begin = datetime.datetime.now()
+    st.session_state.chat_time_end = None
 
 user_prompt = st.sidebar.text_area("You:")
 
