@@ -313,11 +313,11 @@ llm_choice = st.sidebar.selectbox(
 )
 
 # Ollama model selection (only shown if Ollama is selected)
-ollama_model = "llama2"
+ollama_model = "gemma3"
 if llm_choice == "Ollama":
     ollama_model = st.sidebar.text_input(
         "Ollama Model",
-        value="llama2",
+        value="gemma3",
         help="Enter the name of the Ollama model you want to use (e.g., llama2, phi3, mistral, etc.)",
     )
 
