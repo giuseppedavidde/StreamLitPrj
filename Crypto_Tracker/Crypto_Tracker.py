@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from modules.collect_data_utils import collect_bitpanda_data, sort_data_by_asset
+from modules.portfolio_utils import aggregate_portfolio, filter_crypto_df
+from modules.yahoo_utils import calculate_gain_loss, portfolio_history
 
 st.set_page_config(page_title="Crypto Portfolio DCA Dashboard", layout="wide")
 st.title("Crypto Portfolio DCA Dashboard")
@@ -22,7 +24,6 @@ uploaded_file = st.sidebar.file_uploader(
 crypto_df = None
 if uploaded_file is not None:
     path = uploaded_file
-    # Leggi il file in memoria
     data_collected = collect_bitpanda_data(path)
     data_collected = sort_data_by_asset(data_collected)
     df = pd.DataFrame(data_collected)
@@ -36,86 +37,9 @@ if uploaded_file is not None:
     df["asset_market_price_collect"] = pd.to_numeric(
         df["asset_market_price_collect"], errors="coerce"
     )
-    # Filtra stake e transfer
-    df = df[~df["trans_type_collect"].isin(["stake", "transfer"])]
-    # Escludi ETH, EUR, BNB
-    df = df[~df["asset_collect"].isin(["ETH", "EUR", "BNB"])]
-    # Per SOL, considera solo le operazioni di acquisto (buy)
-    df = df[~((df["asset_collect"] == "SOL") & (df["trans_type_collect"] != "buy"))]
-    # Per XRP, considera solo le transazioni dalla transazione specificata in poi
-    xrp_start_id = "T80949796-c9a0-46d1-9e07-09d63d79b6e4"
-    if "XRP" in df["asset_collect"].values:
-        xrp_mask = (df["asset_collect"] != "XRP") | (
-            df["trans_id_collect"] >= xrp_start_id
-        )
-        df = df[xrp_mask]
-    # Segno negativo per le vendite
-    df.loc[df["trans_type_collect"] == "sell", "amount_asset_collect"] *= -1
-    # Depositi BTC
-    btc_deposit_amount = df.loc[
-        (df["asset_collect"] == "BTC") & (df["trans_type_collect"] == "deposit"),
-        "amount_asset_collect",
-    ].sum()
-    btc_deposit_median_price = 34279.00569  # Puoi renderlo dinamico se serve
-    # Rimuovi depositi BTC
-    df = df[~((df["asset_collect"] == "BTC") & (df["trans_type_collect"] == "deposit"))]
-    # Aggrega per asset
-    grouped = (
-        df.groupby("asset_collect")
-        .agg({"amount_asset_collect": "sum", "amount_fiat_collect": "sum"})
-        .reset_index()
-    )
-    grouped["median_price"] = (
-        grouped["amount_fiat_collect"] / grouped["amount_asset_collect"]
-    )
-    # DOGE: aggiungi il deposito iniziale come acquisto
-    doge_initial_price = 0.08632094
-    if "DOGE" in grouped["asset_collect"].values:
-        doge_row = grouped[grouped["asset_collect"] == "DOGE"]
-        doge_total_amount = doge_row["amount_asset_collect"].values[0]
-        doge_total_fiat = doge_total_amount * doge_initial_price
-        grouped.loc[grouped["asset_collect"] == "DOGE", "amount_fiat_collect"] = (
-            doge_total_fiat
-        )
-        grouped.loc[grouped["asset_collect"] == "DOGE", "median_price"] = (
-            doge_initial_price
-        )
-    # Aggiusta BTC con depositi
-    if "BTC" in grouped["asset_collect"].values:
-        btc_row = grouped[grouped["asset_collect"] == "BTC"]
-        btc_total_amount = (
-            btc_row["amount_asset_collect"].values[0] + btc_deposit_amount
-        )
-        btc_total_fiat = btc_row["amount_fiat_collect"].values[0] + (
-            btc_deposit_amount * btc_deposit_median_price
-        )
-        btc_final_median_price = btc_total_fiat / btc_total_amount
-        grouped.loc[grouped["asset_collect"] == "BTC", "amount_asset_collect"] = (
-            btc_total_amount
-        )
-        grouped.loc[grouped["asset_collect"] == "BTC", "amount_fiat_collect"] = (
-            btc_total_fiat
-        )
-        grouped.loc[grouped["asset_collect"] == "BTC", "median_price"] = (
-            btc_final_median_price
-        )
-    else:
-        grouped = pd.concat(
-            [
-                grouped,
-                pd.DataFrame(
-                    {
-                        "asset_collect": ["BTC"],
-                        "amount_asset_collect": [btc_deposit_amount],
-                        "amount_fiat_collect": [
-                            btc_deposit_amount * btc_deposit_median_price
-                        ],
-                        "median_price": [btc_deposit_median_price],
-                    }
-                ),
-            ],
-            ignore_index=True,
-        )
+    # Filtri e aggregazione
+    df = filter_crypto_df(df)
+    grouped = aggregate_portfolio(df)
     crypto_df = grouped
     st.subheader("Crypto Portfolio Aggregato per Asset")
     st.dataframe(crypto_df)
@@ -143,6 +67,31 @@ if uploaded_file is not None:
         yaxis_title="Prezzo Medio",
     )
     st.plotly_chart(fig2, use_container_width=True)
+    # Tabella Gain/Loss
+    gain_df = calculate_gain_loss(crypto_df)
+    st.subheader("Gain/Loss Portfolio")
+    st.dataframe(gain_df)
+    # Grafico storico portafoglio
+    st.markdown("### Andamento Storico del Portafoglio")
+    history_df = portfolio_history(crypto_df)
+    if not history_df.empty:
+        fig3 = go.Figure()
+        fig3.add_trace(
+            go.Scatter(
+                x=history_df.index,
+                y=history_df["total_value"],
+                mode="lines",
+                name="Valore Totale",
+            )
+        )
+        fig3.update_layout(
+            title="Valore del Portafoglio nel Tempo (EUR)",
+            xaxis_title="Data",
+            yaxis_title="Valore Totale (EUR)",
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.info("Storico non disponibile per uno o più asset.")
     # Download CSV aggregato
     csv = crypto_df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
