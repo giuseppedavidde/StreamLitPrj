@@ -1,4 +1,5 @@
 modules/__pycache__/*.pyc
 *.png
+api_key/*
 .venv/*
 

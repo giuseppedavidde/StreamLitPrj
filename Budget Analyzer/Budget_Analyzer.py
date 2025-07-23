@@ -1,27 +1,28 @@
-import streamlit as st
-from modules import streamlit_utils
-from modules import general_utils
-from modules.general_utils import np, pd, dt
-from modules.general_utils import (
-    month_year,
-    format_percentage,
-    simple_mean,
-    dynamic_avg,
-    sum,
-    calculate_sum_and_average,
-    stipendio_annuo_totale,
-    reddito_annuo,
-    numero_anni,
-)
-from modules.collect_data_utils import (
-    get_current_user,
-    collect_data_from_csv,
-    collect_data_from_list_csv,
-    collect_numb_sample,
-    collect_file,
-)
-from modules.prediction_models import find_best_model, project_future_values
+import datetime
+import json
 
+import streamlit as st
+from modules.collect_data_utils import (
+    collect_data_from_csv,
+    collect_numb_sample,
+    get_current_user,
+)
+from modules.general_utils import (
+    dynamic_avg,
+    format_percentage,
+    month_year,
+    pd,
+    stipendio_annuo_totale,
+    sum,
+)
+from modules.llm_utils import (
+    get_gemini_api_key,
+    init_chat_state,
+    new_chat,
+    query_gemini_flash,
+    render_chat,
+)
+from modules.prediction_models import project_future_values
 
 # Streamlit Dashboard Title and Description
 st.set_page_config(page_title="Budget Analyzer Dashboard", layout="wide")
@@ -205,11 +206,11 @@ data_summary = {
     "Investimenti": format_percentage(
         perct_avg_results["investement_total_perct_avg_values"][-1]
     ),
-    "Reddito Medio": f"€ {avg_results["reddito_avg_values"][-1]:.2f}",
-    "Stipendio Medio": f"€ {avg_results["reddito_only_ifx_avg_values"][-1]:.2f}",
-    "Spesa Netta Media": f"€ {avg_results["spese_nette_avg_values"][-1]:.2f}",
-    "Risparmio Medio Mensile con Investimenti": f"€{avg_results["risparmio_invest_liquid_avg_values"][-1]}",
-    "Risparmio Medio Mensile senza Investimenti": f"€{avg_results["risparmio_netto_avg_values"][-1]}",
+    "Reddito Medio": f"€ {avg_results['reddito_avg_values'][-1]:.2f}",
+    "Stipendio Medio": f"€ {avg_results['reddito_only_ifx_avg_values'][-1]:.2f}",
+    "Spesa Netta Media": f"€ {avg_results['spese_nette_avg_values'][-1]:.2f}",
+    "Risparmio Medio Mensile con Investimenti": f"€{avg_results['risparmio_invest_liquid_avg_values'][-1]}",
+    "Risparmio Medio Mensile senza Investimenti": f"€{avg_results['risparmio_netto_avg_values'][-1]}",
 }
 
 # Creazione di un DataFrame pandas
@@ -506,48 +507,40 @@ if section == "Previsioni (ML)":
         risparmio_netto_predicted_avg_values = dynamic_avg(
             risparmio_netto_predicted_collect
         )
-        ############# CALCOLI PERCENTUALI SU VALORI PUNTUALI MEDIATI #########
-        # costo_casa_predicted_perct_values = (
-        #     costo_casa_predicted_collect / reddito_predicted_collect
-        # ) * 100
-        # investment_predicted_perct_values = (
-        #     investment_predicted_collect / reddito_predicted_collect
-        # ) * 100
-        # spese_nette_predicted_perct_values = (
-        #     spese_nette_predicted_collect / reddito_predicted_collect
-        # ) * 100
-        # risparmio_global_predicted_perct_values = (
-        #     risparmio_netto_predicted_collect / reddito_predicted_collect
-        # ) * 100
-        # risparmio_predicted_no_invest_perct_values = (
-        #     risparmio_global_predicted_perct_values - investment_predicted_perct_values
-        # )
-        costo_casa_predicted_perct_values = (
-            costo_casa_predicted_avg_values / reddito_predicted_avg_values
-        ) * 100
-        investment_predicted_perct_values = (
-            investment_predicted_avg_values / reddito_predicted_avg_values
-        ) * 100
-        spese_nette_predicted_perct_values = (
-            spese_nette_predicted_avg_values / reddito_predicted_avg_values
-        ) * 100
-        risparmio_global_predicted_perct_values = (
-            risparmio_netto_predicted_avg_values / reddito_predicted_avg_values
-        ) * 100
-        risparmio_predicted_no_invest_perct_values = (
-            risparmio_global_predicted_perct_values - investment_predicted_perct_values
-        )
-        # st.dataframe(prediction)
-        from modules import plot_utils
-
-        # Example plot: predicted vs historical net expenses
-        plot_utils.create_plot(
-            x=list(range(len(spese_nette_predicted_collect))),
-            y=[spese_nette_predicted_collect, spese_nette_predicted_avg_values],
-            name_trace=["Spese Nette Predette", "Spese Nette Predette Medie"],
-            name_graph="Previsione Spese Nette",
-            overlap=True,
-            n_traces=2,
-        )
     except Exception as e:
-        st.warning(f"Funzione di previsione non disponibile: {e}")
+        st.error(f"Errore durante la previsione: {e}")
+
+# --- Gemini ChatBot Section ---
+st.sidebar.markdown("---")
+st.sidebar.header("Gemini ChatBot")
+init_chat_state()
+GEMINI_API_KEY = get_gemini_api_key()
+if not GEMINI_API_KEY:
+    st.sidebar.warning("Please add your Gemini API key to api_key/gemini_key.toml.")
+if st.sidebar.button("New Chat", key="new_chat_gemini"):
+    new_chat()
+user_prompt = st.sidebar.text_area("You (ChatBot):")
+# Prepare context data for LLM
+context_data = json.dumps(
+    {
+        "number_months": number_months,
+        "data_summary": data_summary,
+        "main_metrics": {
+            k: v.tolist() if hasattr(v, "tolist") else v
+            for k, v in avg_results.items()
+            if k.endswith("_avg_values")
+        },
+    }
+)
+if GEMINI_API_KEY and st.sidebar.button("Send", key="send_gemini") and user_prompt:
+    st.session_state.chat_history.append(("user", user_prompt))
+    with st.spinner("Gemini is thinking..."):
+        try:
+            ai_response = query_gemini_flash(
+                user_prompt, GEMINI_API_KEY, context_data=context_data
+            )
+            st.session_state.chat_history.append(("ai", ai_response))
+        except Exception as e:
+            st.session_state.chat_history.append(("ai", f"Error: {e}"))
+    st.session_state.chat_time_end = datetime.datetime.now()
+render_chat()
