@@ -23,6 +23,7 @@ from modules.llm_utils import (
     render_chat,
 )
 from modules.prediction_models import project_future_values
+from modules.streamlit_utils import upload_data_folder
 
 # Streamlit Dashboard Title and Description
 st.set_page_config(page_title="Budget Analyzer Dashboard", layout="wide")
@@ -33,8 +34,24 @@ Analisi interattiva del budget personale: riepilogo, visualizzazioni, confronti 
 """
 )
 
-# Ottieni i nomi dei file CSV nella tua directory
-PATH = f"C:\\Users\\{get_current_user()}\\Downloads\\Telegram Desktop\\Budget Semplice"
+from modules.streamlit_utils import upload_data_folder
+
+# --- Data folder selection UI ---
+st.sidebar.header("Selezione della cartella dati")
+data_source = st.sidebar.radio(
+    "Scegli la sorgente dei dati:", ["Upload folder", "Usa cartella locale"], index=1
+)
+PATH = None
+uploaded_files = None
+if data_source == "Upload folder":
+    PATH, uploaded_files = upload_data_folder()
+    if not PATH:
+        st.warning("Carica almeno un file CSV per continuare.")
+        st.stop()
+else:
+    PATH = (
+        f"C:\\Users\\{get_current_user()}\\Downloads\\Telegram Desktop\\Budget Semplice"
+    )
 
 # Time Informations
 month, year = month_year()
@@ -539,8 +556,20 @@ if GEMINI_API_KEY and st.sidebar.button("Send", key="send_gemini") and user_prom
             ai_response = query_gemini_flash(
                 user_prompt, GEMINI_API_KEY, context_data=context_data
             )
-            st.session_state.chat_history.append(("ai", ai_response))
+            # Insert latest AI response at the beginning of chat history
+            st.session_state.chat_history = [
+                ("ai", ai_response)
+            ] + st.session_state.chat_history
         except Exception as e:
-            st.session_state.chat_history.append(("ai", f"Error: {e}"))
+            st.session_state.chat_history = [
+                ("ai", f"Error: {e}")
+            ] + st.session_state.chat_history
     st.session_state.chat_time_end = datetime.datetime.now()
 render_chat()
+
+folder_path, uploaded_files = upload_data_folder()
+if folder_path:
+    # Use your collect_data_utils functions to process files in folder_path
+    # Example:
+    # data = collect_data_from_csv(folder_path, True, "your_file_pattern", "your_regexp")
+    pass

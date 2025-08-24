@@ -1,5 +1,6 @@
 import streamlit as st
 import tempfile
+import os
 
 
 def set_page_config():
@@ -27,6 +28,24 @@ def upload_csv_files():
         path = temp_dir
         st.success(f"{len(uploaded_files)} file caricati con successo!")
     return path, uploaded_files
+
+
+def upload_data_folder():
+    st.header("Upload Data Folder")
+    uploaded_files = st.file_uploader(
+        "Upload all CSV files from your data folder",
+        type=["csv"],
+        accept_multiple_files=True,
+    )
+    folder_path = None
+    if uploaded_files:
+        temp_dir = tempfile.mkdtemp()
+        for file in uploaded_files:
+            with open(os.path.join(temp_dir, file.name), "wb") as f:
+                f.write(file.getbuffer())
+        folder_path = temp_dir
+        st.success(f"{len(uploaded_files)} files uploaded to {folder_path}")
+    return folder_path, uploaded_files
 
 
 def show_info_message(msg):
