@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import streamlit as st
+from modules.llm_utils import setup_llm, get_options_advice
 
 
 def find_pivots(series: pd.Series, pivot_window: int, min_points: int = 500):
@@ -116,118 +117,219 @@ def prepare_plot_df(
 # --- Streamlit UI ---
 st.title("Support & Resistance — Visualizzazione Storica")
 
-ticker = st.text_input("Ticker (es. AAPL)", value="DUOL").strip().upper()
-period = st.selectbox(
-    "Periodo storico", ["1y", "2y", "6mo", "3mo", "1mo", "5y"], index=0
-)
-window = st.slider("Finestra (giorni) per pivot locale (prima/dopo)", 1, 60, 14)
-tol_type = st.radio(
-    "Tipo di tolleranza per raggruppamento livelli",
-    ("relativa (%)", "assoluta (valore)"),
-)
-if tol_type == "relativa (%)":
-    tol_rel = st.slider("Tolleranza relativa (%)", 0.1, 10.0, 0.5) / 100.0
-    tol_abs = None
-else:
-    tol_abs = st.number_input("Tolleranza assoluta (es. 0.5)", min_value=0.0, value=0.5)
-    tol_rel = 0.005
+# Inizializzazione efficiente dello stato
+if "app_state" not in st.session_state:
+    st.session_state.app_state = {
+        "llm_model": None,
+        "chat": {"messages": [], "last_analysis": None},
+        "data": {"ticker": None, "price": None, "resistances": [], "supports": []},
+    }
 
-debug = st.checkbox("Mostra debug step-by-step", value=False)
+# Inizializza LLM solo se necessario
+if not st.session_state.app_state["llm_model"]:
+    try:
+        st.session_state.app_state["llm_model"] = setup_llm()
+    except Exception as e:
+        st.error(f"Errore configurazione LLM: {str(e)}")
 
-if st.button("Calcola e mostra supporti/resistenze"):
-    if not ticker:
-        st.error("Inserisci un ticker valido.")
+# Layout UI ottimizzato
+col1, col2 = st.columns([3, 1])
+with col1:
+    ticker = st.text_input("Ticker (es. AAPL)", value="DUOL").strip().upper()
+    period = st.selectbox(
+        "Periodo storico", ["1y", "2y", "6mo", "3mo", "1mo", "5y"], index=0
+    )
+    window = st.slider("Finestra (giorni) per pivot locale (prima/dopo)", 1, 60, 14)
+
+with col2:
+    tol_type = st.radio("Tipo di tolleranza", ("relativa (%)", "assoluta (valore)"))
+    if tol_type == "relativa (%)":
+        tol_rel = st.slider("Tolleranza (%)", 0.1, 10.0, 0.5) / 100.0
+        tol_abs = None
     else:
-        try:
-            valid_data = True
-            data = None
-            close = None
+        tol_abs = st.number_input("Tolleranza", min_value=0.0, value=0.5)
+        tol_rel = 0.005
 
-            # 1) Download dei dati
+debug = st.checkbox("Debug mode", value=False)
+
+# Tabs per separare analisi e chat
+tab1, tab2 = st.tabs(["📊 Analisi Tecnica", "💬 Chat Analista"])
+
+with tab1:
+    if st.button("Calcola Livelli"):
+        if not ticker:
+            st.error("Inserisci un ticker valido.")
+        else:
             try:
-                data = yf.download(ticker, period=period, progress=False)
-                if data is None or getattr(data, "empty", True):
-                    st.error("Impossibile scaricare i dati per il ticker richiesto.")
-                    valid_data = False
-            except (ValueError, KeyError) as e:
-                st.error(f"Errore durante il download dei dati: {str(e)}")
-                valid_data = False
+                # Download e preparazione dati
+                with st.spinner("Scaricamento dati..."):
+                    data = yf.download(ticker, period=period, progress=False)
+                    if data is None or data.empty or "Close" not in data.columns:
+                        st.error("Dati non disponibili per questo ticker.")
+                    else:
+                        close = data["Close"].dropna()
+                        close.index = pd.to_datetime(close.index)
 
-            if valid_data:
-                if data is None or "Close" not in data.columns:
-                    st.error("Colonna Close non presente nei dati scaricati.")
-                    valid_data = False
+                        if len(close) < 2 * window + 1:
+                            st.warning(
+                                "Serie troppo corta per la finestra selezionata."
+                            )
+
+                        else:
+                            # Calcolo livelli
+                            res_pivots, sup_pivots = find_pivots(close, window)
+                            if debug:
+                                st.write(
+                                    "Pivot trovati:", len(res_pivots) + len(sup_pivots)
+                                )
+
+                            # Clusterizza i livelli
+                            clustered_res = cluster_levels(
+                                res_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
+                            )
+                            clustered_sup = cluster_levels(
+                                sup_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
+                            )
+
+                            # Grafico
+                            plot_df = prepare_plot_df(
+                                close, clustered_res, clustered_sup
+                            )
+                            st.line_chart(plot_df)
+
+                            # Livelli
+                            col3, col4 = st.columns(2)
+                            with col3:
+                                st.subheader("⬆️ Resistenze")
+                                for i, r in enumerate(
+                                    sorted(clustered_res, reverse=True), 1
+                                ):
+                                    st.write(f"R{i}: ${r:.4f}")
+
+                            with col4:
+                                st.subheader("⬇️ Supporti")
+                                for i, s in enumerate(sorted(clustered_sup), 1):
+                                    st.write(f"S{i}: ${s:.4f}")
+
+                            # Export CSV
+                            res_list = (
+                                sorted(clustered_res, reverse=True)
+                                if clustered_res
+                                else []
+                            )
+                            sup_list = sorted(clustered_sup) if clustered_sup else []
+                            max_len = max(len(res_list), len(sup_list))
+                            res_list.extend([None] * (max_len - len(res_list)))
+                            sup_list.extend([None] * (max_len - len(sup_list)))
+
+                            # Export CSV
+                            levels_df = pd.DataFrame(
+                                {
+                                    "resistances": res_list,
+                                    "supports": sup_list,
+                                }
+                            )
+                            csv = levels_df.to_csv(index=False, na_rep="")
+                            st.download_button(
+                                "Scarica livelli (CSV)",
+                                data=csv,
+                                file_name=f"{ticker}_levels.csv",
+                            )
+
+                            # Aggiorna stato per la chat
+                            st.session_state.app_state["data"].update(
+                                {
+                                    "ticker": ticker,
+                                    "price": float(close.iloc[-1]),
+                                    "resistances": clustered_res,
+                                    "supports": clustered_sup,
+                                }
+                            )
+                            # Reset chat solo se cambiano i dati
+                            if st.session_state.app_state["chat"]["messages"]:
+                                st.session_state.app_state["chat"]["messages"] = []
+                                st.session_state.app_state["chat"][
+                                    "last_analysis"
+                                ] = None
+
+            except Exception as e:
+                st.error(f"Errore nell'elaborazione: {str(e)}")
+
+with tab2:
+    if not st.session_state.app_state["data"]["ticker"]:
+        st.warning("🔍 Prima calcola i livelli tecnici")
+    else:
+        chat_col1, chat_col2 = st.columns([2, 1])
+
+        with chat_col1:
+            st.markdown("### 💬 Conversazione")
+            for msg in st.session_state.app_state["chat"]["messages"]:
+                st.markdown("---")
+                if msg["role"] == "user":
+                    st.markdown(f"**👤 Tu**: {msg['content']}")
                 else:
-                    # 2) Preparazione serie temporale
-                    close = data["Close"].dropna()
-                    close.index = pd.to_datetime(close.index)
-                    if debug:
-                        st.write("Dati Close (prime righe):")
-                        st.dataframe(close.head(10))
+                    st.markdown(msg["content"])
 
-                    if len(close) < 2 * window + 1:
-                        st.warning(
-                            "Serie troppo corta per la finestra richiesta. Riduci la finestra o scegli un periodo più lungo."
+        with chat_col2:
+            state = st.session_state.app_state
+
+            # Mostra dati tecnici attuali
+            st.markdown("### 📊 Livelli Attuali")
+            st.markdown(
+                f"**{state['data']['ticker']} - ${state['data']['price']:.2f}**"
+            )
+            st.markdown("**Resistenze**:")
+            for r in sorted(state["data"]["resistances"], reverse=True):
+                st.markdown(f"- ${r:.2f}")
+            st.markdown("**Supporti**:")
+            for s in sorted(state["data"]["supports"]):
+                st.markdown(f"- ${s:.2f}")
+
+            # Controlli chat
+            st.markdown("### 🤖 Azioni")
+            if st.button("🔄 Nuova Analisi"):
+                with st.spinner("Analisi in corso..."):
+                    try:
+                        advice = get_options_advice(
+                            model=state["llm_model"],
+                            ticker=state["data"]["ticker"],
+                            current_price=state["data"]["price"],
+                            resistances=sorted(
+                                state["data"]["resistances"], reverse=True
+                            ),
+                            supports=sorted(state["data"]["supports"]),
                         )
-                        valid_data = False
+                        state["chat"]["messages"].append(
+                            {"role": "assistant", "content": advice}
+                        )
+                        state["chat"]["last_analysis"] = advice
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore analisi: {str(e)}")
 
-            if valid_data and close is not None:
-                # 3) Trova pivot locali
-                res_pivots, sup_pivots = find_pivots(close, window)
-                if debug:
-                    st.write("Pivot (raw) - resistenze:", res_pivots)
-                    st.write("Pivot (raw) - supporti:", sup_pivots)
+            question = st.text_input("💭 La tua domanda:", key="question")
+            if st.button("📤 Invia") and question:
+                state["chat"]["messages"].append({"role": "user", "content": question})
+                with st.spinner("Elaborazione..."):
+                    try:
+                        response = get_options_advice(
+                            model=state["llm_model"],
+                            ticker=state["data"]["ticker"],
+                            current_price=state["data"]["price"],
+                            resistances=state["data"]["resistances"],
+                            supports=state["data"]["supports"],
+                            context=state["chat"]["last_analysis"],
+                            is_follow_up=True,
+                            follow_up_question=question,
+                        )
+                        state["chat"]["messages"].append(
+                            {"role": "assistant", "content": response}
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore: {str(e)}")
 
-                # 4) Clusterizza i livelli vicini
-                clustered_res = cluster_levels(
-                    res_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
-                )
-                clustered_sup = cluster_levels(
-                    sup_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
-                )
-                if debug:
-                    st.write("Resistenze clusterizzate:", clustered_res)
-                    st.write("Supporti clusterizzati:", clustered_sup)
-
-                # 5) Prepara DataFrame e mostra grafico
-                plot_df = prepare_plot_df(close, clustered_res, clustered_sup)
-                st.line_chart(plot_df)
-
-                # 6) Mostra livelli tabellati
-                st.subheader("Livelli di Resistenza (dall'alto verso il basso)")
-                if clustered_res:
-                    for i, r in enumerate(sorted(clustered_res, reverse=True), start=1):
-                        st.write(f"R{i}: {r:.4f}")
-                else:
-                    st.write("Nessuna resistenza trovata.")
-
-                st.subheader("Livelli di Supporto (dal basso verso l'alto)")
-                if clustered_sup:
-                    for i, s in enumerate(sorted(clustered_sup), start=1):
-                        st.write(f"S{i}: {s:.4f}")
-                else:
-                    st.write("Nessun supporto trovato.")
-
-                # 7) Export CSV
-                # Prepara liste di uguale lunghezza aggiungendo None per bilanciare
-                res_list = sorted(clustered_res, reverse=True) if clustered_res else []
-                sup_list = sorted(clustered_sup) if clustered_sup else []
-                max_len = max(len(res_list), len(sup_list))
-                res_list.extend([None] * (max_len - len(res_list)))
-                sup_list.extend([None] * (max_len - len(sup_list)))
-
-                levels_df = pd.DataFrame(
-                    {
-                        "resistances": res_list,
-                        "supports": sup_list,
-                    }
-                )
-                csv = levels_df.to_csv(index=False, na_rep="")
-                st.download_button(
-                    "Scarica livelli (CSV)", data=csv, file_name=f"{ticker}_levels.csv"
-                )
-
-        except (ValueError, KeyError) as e:
-            st.error(f"Si è verificato un errore durante l'elaborazione: {str(e)}")
-        except Exception as e:
-            st.error("Errore imprevisto durante l'elaborazione.")
+            if st.button("🗑️ Reset Chat"):
+                state["chat"]["messages"] = []
+                state["chat"]["last_analysis"] = None
+                st.rerun()
