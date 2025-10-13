@@ -1,7 +1,17 @@
-import yfinance as yf
-import pandas as pd
+import json
+
 import numpy as np
+import pandas as pd
 import streamlit as st
+import yfinance as yf
+from modules.llm_utils import (
+    get_gemini_api_key,
+    init_chat_state,
+    new_chat,
+    query_gemini_flash,
+    render_chat,
+    save_gemini_api_key,
+)
 
 
 def find_pivots(series: pd.Series, pivot_window: int, min_points: int = 500):
@@ -116,9 +126,41 @@ def prepare_plot_df(
 # --- Streamlit UI ---
 st.title("Support & Resistance — Visualizzazione Storica")
 
+# --- Gemini API key management (via llm_utils) ---
+st.sidebar.markdown("---")
+st.sidebar.header("Gemini API Key")
+current_key = get_gemini_api_key()
+masked = (
+    (current_key[:4] + "..." + current_key[-4:])
+    if current_key and len(current_key) > 8
+    else "(none)"
+)
+st.sidebar.write(f"Key attuale: {masked}")
+new_key = st.sidebar.text_input(
+    "Incolla qui la Gemini API Key (visibile solo a te)", value=""
+)
+if st.sidebar.button("Salva API Key"):
+    ok = save_gemini_api_key(new_key.strip())
+    if ok:
+        st.sidebar.success("API Key salvata.")
+    else:
+        st.sidebar.error("Errore nel salvare la API Key.")
+
+if st.sidebar.button("Rimuovi API Key"):
+    ok = save_gemini_api_key(None)
+    if ok:
+        st.sidebar.success("API Key rimossa.")
+    else:
+        st.sidebar.error("Errore nella rimozione della API Key.")
+
+# Expose the currently stored key to the session for later use by other UI actions
+st.session_state["gemini_api_key"] = get_gemini_api_key()
+
+# Keep API key controls above; chat UI will be rendered after the ticker so it can be dynamic
+
 ticker = st.text_input("Ticker (es. AAPL)", value="DUOL").strip().upper()
 period = st.selectbox(
-    "Periodo storico", ["1y", "2y", "6mo", "3mo", "1mo", "5y"], index=0
+    "Periodo storico", ["5y", "1y", "2y", "6mo", "3mo", "1mo", "5d"], index=0
 )
 window = st.slider("Finestra (giorni) per pivot locale (prima/dopo)", 1, 60, 14)
 tol_type = st.radio(
@@ -133,6 +175,100 @@ else:
     tol_rel = 0.005
 
 debug = st.checkbox("Mostra debug step-by-step", value=False)
+
+# --- Sidebar chat UI (rendered after having ticker input so it can be dynamic) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("Ask Gemini about this SR analysis")
+sidebar_gemini_key = st.session_state.get("gemini_api_key")
+
+# Example loader to test chat quickly
+if st.sidebar.button("Carica esempio SR (DUOL)"):
+    st.session_state["sr_summary"] = {
+        "ticker": "DUOL",
+        "period": "5y",
+        "resistances": [
+            529.9080078125,
+            238.5980010986328,
+            229.3220001220703,
+            103.14499855041504,
+        ],
+        "supports": [
+            68.2959991455078,
+            72.38999938964844,
+            129.75800018310548,
+            167.31199951171874,
+            177.11249923706055,
+            279.8279968261719,
+        ],
+    }
+    st.session_state["gemini_prefill_prompt"] = (
+        "Given the support and resistance levels for DUOL, give concise trading suggestions: entry points, stop-loss guidance, target levels, and risk management."
+    )
+
+init_chat_state()
+
+if sidebar_gemini_key:
+    sr_preview = st.session_state.get("sr_summary")
+    # Show dynamic context relative to the current ticker
+    if sr_preview and sr_preview.get("ticker") == ticker:
+        st.sidebar.write(
+            f"Context: Ticker={sr_preview.get('ticker')}, Resistances={sr_preview.get('resistances')}, Supports={sr_preview.get('supports')}"
+        )
+    elif sr_preview:
+        st.sidebar.write(
+            f"Last computed SR (ticker={sr_preview.get('ticker')}). Compute for {ticker} to update context."
+        )
+    else:
+        st.sidebar.info(
+            "Nessun SR summary ancora disponibile. Esegui prima il calcolo."
+        )
+
+    # Chat control buttons
+    if st.sidebar.button("Nuova chat"):
+        new_chat()
+        st.sidebar.success("Nuova chat avviata.")
+    if st.sidebar.button("Pulisci storico chat"):
+        new_chat()
+        st.sidebar.success("Cronologia cancellata.")
+
+    with st.sidebar.form("gemini_chat_form", clear_on_submit=False):
+        user_prompt_side = st.text_area(
+            "Prompt per Gemini:",
+            value=st.session_state.get("gemini_prefill_prompt", ""),
+            height=120,
+        )
+        submit_side = st.form_submit_button("Send to Gemini")
+        if submit_side:
+            if not (user_prompt_side or "").strip():
+                st.sidebar.error("Inserisci un prompt prima di inviare.")
+            else:
+                # pick the sr_summary that matches the current ticker if available
+                sr_preview = st.session_state.get("sr_summary")
+                if not sr_preview or sr_preview.get("ticker") != ticker:
+                    st.sidebar.error(
+                        "Il contesto SR non è aggiornato per questo ticker. Esegui il calcolo prima di inviare."
+                    )
+                else:
+                    with st.spinner("Interrogating Gemini..."):
+                        try:
+                            context_data = json.dumps(sr_preview)
+                            ai_response = query_gemini_flash(
+                                user_prompt_side,
+                                sidebar_gemini_key,
+                                context_data=context_data,
+                            )
+                            st.session_state.setdefault("chat_history", []).append(
+                                ("user", user_prompt_side)
+                            )
+                            st.session_state.setdefault("chat_history", []).append(
+                                ("ai", ai_response)
+                            )
+                            st.sidebar.success("Risposta ricevuta.")
+                            st.sidebar.write(ai_response)
+                        except Exception as e:
+                            st.sidebar.error(f"Errore nella chiamata LLM: {e}")
+else:
+    st.sidebar.info("Incolla la Gemini API Key per abilitare il chat")
 
 if st.button("Calcola e mostra supporti/resistenze"):
     if not ticker:
@@ -227,7 +363,32 @@ if st.button("Calcola e mostra supporti/resistenze"):
                     "Scarica livelli (CSV)", data=csv, file_name=f"{ticker}_levels.csv"
                 )
 
+                # Save summary into session_state so LLM chat can use it
+                sr_summary = {
+                    "ticker": ticker,
+                    "period": period,
+                    "resistances": sorted(clustered_res, reverse=True),
+                    "supports": sorted(clustered_sup),
+                }
+                st.session_state["sr_summary"] = sr_summary
+                # Chat UI is handled in the sidebar to avoid re-running the main calculation
+                # Show chat history in the main area (if any)
+                if st.session_state.get("chat_history"):
+                    st.markdown("---")
+                    st.subheader("Chat history")
+                    try:
+                        render_chat()
+                    except Exception:
+                        # Fallback simple rendering
+                        for who, msg in st.session_state.get("chat_history", []):
+                            if who == "system":
+                                continue
+                            elif who == "user":
+                                st.write(f"You: {msg}")
+                            else:
+                                st.write(f"Gemini: {msg}")
+
         except (ValueError, KeyError) as e:
             st.error(f"Si è verificato un errore durante l'elaborazione: {str(e)}")
-        except Exception as e:
+        except Exception:
             st.error("Errore imprevisto durante l'elaborazione.")
