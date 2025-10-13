@@ -6,3 +6,4 @@ yfinance
 requests
 scipy
 toml
+python-dotenv

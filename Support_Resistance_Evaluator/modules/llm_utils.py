@@ -5,9 +5,67 @@ import requests
 import streamlit as st
 import toml
 
+# dotenv is optional at runtime; prefer st.secrets / env vars for deployed apps
+try:
+    from dotenv import load_dotenv, set_key, unset_key
+
+    _HAS_DOTENV = True
+except Exception:
+    _HAS_DOTENV = False
+
 API_KEY_PATH = os.path.join(
     os.path.dirname(__file__), "..", "api_key", "gemini_key.toml"
 )
+DOTENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+
+
+def _write_env_var_manual(path: str, key: str, value: str):
+    """Simple manual updater for .env when python-dotenv is not available.
+
+    It updates the key if present, otherwise appends it. This is best-effort and
+    keeps the file readable.
+    """
+    lines = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except Exception:
+            lines = []
+
+    key_prefix = f"{key}="
+    found = False
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith(key_prefix):
+            lines[i] = f"{key}={value}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{key}={value}")
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + ("\n" if lines else ""))
+    except Exception:
+        # best-effort: ignore write failures here
+        pass
+
+
+def _unset_env_var_manual(path: str, key: str):
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return
+    key_prefix = f"{key}="
+    new_lines = [ln for ln in lines if not ln.strip().startswith(key_prefix)]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(new_lines) + ("\n" if new_lines else ""))
+    except Exception:
+        pass
 
 
 def get_gemini_api_key():
@@ -30,7 +88,16 @@ def get_gemini_api_key():
         # If secrets are not available in this environment, move on
         pass
 
-    # 2) Environment variable
+    # Load .env if present (populates os.environ)
+    # Try to load .env if python-dotenv is available
+    if _HAS_DOTENV:
+        try:
+            load_dotenv(DOTENV_PATH, override=False)
+        except Exception:
+            # If python-dotenv fails for any reason, continue to env/TOML fallback
+            pass
+
+    # 2) Environment variable (this will include values loaded from .env)
     env_key = os.getenv("GEMINI_API_KEY")
     if env_key:
         return env_key
@@ -51,12 +118,40 @@ def save_gemini_api_key(api_key: str | None) -> bool:
     Returns True on success, False on failure.
     """
     try:
+        # Ensure api_key directory exists for TOML fallback
         dirpath = os.path.dirname(API_KEY_PATH)
         if not os.path.isdir(dirpath):
             os.makedirs(dirpath, exist_ok=True)
 
+        # Prefer storing into .env for dotenv-based workflows
+        if _HAS_DOTENV:
+            try:
+                # If removing the key, unset it from .env
+                if not api_key:
+                    try:
+                        unset_key(DOTENV_PATH, "GEMINI_API_KEY")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        set_key(DOTENV_PATH, "GEMINI_API_KEY", api_key)
+                    except Exception:
+                        pass
+            except Exception:
+                # ignore dotenv errors and continue to TOML fallback
+                pass
+        else:
+            # Fallback: update .env manually so environment-based workflows can use it
+            try:
+                if not api_key:
+                    _unset_env_var_manual(DOTENV_PATH, "GEMINI_API_KEY")
+                else:
+                    _write_env_var_manual(DOTENV_PATH, "GEMINI_API_KEY", api_key)
+            except Exception:
+                pass
+
+        # Maintain the existing TOML storage for backward compatibility
         if not api_key:
-            # Remove file if exists
             if os.path.exists(API_KEY_PATH):
                 os.remove(API_KEY_PATH)
             return True
