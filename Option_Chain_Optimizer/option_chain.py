@@ -21,6 +21,8 @@ else:
 
 
 # --- IBKR API Connection ---
+
+# --- IBKR API Connection ---
 st.sidebar.markdown("---")
 st.sidebar.header("IBKR API Connection")
 if "ibkr_connected" not in st.session_state:
@@ -28,30 +30,74 @@ if "ibkr_connected" not in st.session_state:
 if "ibkr_status" not in st.session_state:
     st.session_state.ibkr_status = "Not connected"
 
+
+# Store last used port/client_id for reconnection
+if "ibkr_last_port" not in st.session_state:
+    st.session_state.ibkr_last_port = 7497
+if "ibkr_last_client_id" not in st.session_state:
+    st.session_state.ibkr_last_client_id = 1
+
 ibkr_port = st.sidebar.selectbox(
     "API Port",
     options=[7497, 7496],
     index=0,
     help="7496 for TWS Real Trading, 7497 for Paper Trading",
+    key="ibkr_port_selectbox",
 )
 ibkr_client_id = st.sidebar.number_input(
-    "Client ID", min_value=1, max_value=999, value=1
+    "Client ID", min_value=1, max_value=999, value=1, key="ibkr_client_id_input"
 )
+
+
+# On rerun, try to reconnect if TWS is active but session state is missing IBKR reference
+if "ibkr_ib" not in st.session_state or st.session_state.ibkr_ib is None:
+    try:
+        import asyncio
+
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        from ib_insync import IB
+
+        # Close any existing connection first
+        old_ib = st.session_state.get("ibkr_ib")
+        if (
+            old_ib is not None
+            and hasattr(old_ib, "isConnected")
+            and old_ib.isConnected()
+        ):
+            try:
+                old_ib.disconnect()
+                old_ib.shutdown()
+            except Exception:
+                pass
+            st.session_state.ibkr_ib = None
+            st.session_state.ibkr_connected = False
+            st.session_state.ibkr_status = "Previous IBKR connection closed."
+        ib = IB()
+        ib.connect(
+            "127.0.0.1",
+            int(st.session_state.ibkr_last_port),
+            clientId=int(st.session_state.ibkr_last_client_id),
+            timeout=5,
+        )
+        if ib.isConnected():
+            st.session_state.ibkr_ib = ib
+            st.session_state.ibkr_connected = True
+            st.session_state.ibkr_status = f"Reconnected to IBKR API on port {st.session_state.ibkr_last_port} (Client ID {st.session_state.ibkr_last_client_id})"
+    except Exception:
+        pass
 
 
 def connect_ibkr_api(port, client_id):
     import asyncio
 
-    # Check for any existing IBKR connection and disconnect it first
     old_ib = st.session_state.get("ibkr_ib")
-    if old_ib is not None:
+    if old_ib is not None and hasattr(old_ib, "isConnected") and old_ib.isConnected():
         try:
-            if old_ib.isConnected():
-                old_ib.disconnect()
-            try:
-                old_ib.shutdown()
-            except Exception:
-                pass
+            old_ib.disconnect()
+            old_ib.shutdown()
         except Exception:
             pass
         st.session_state.ibkr_ib = None
@@ -62,56 +108,90 @@ def connect_ibkr_api(port, client_id):
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
     from ib_insync import IB
 
     ib = IB()
-    try:
-        ib.connect("127.0.0.1", int(port), clientId=int(client_id), timeout=5)
-        if ib.isConnected():
-            st.session_state.ibkr_ib = ib
-            return True, f"Connected to IBKR API on port {port} (Client ID {client_id})"
-        else:
-            return (
-                False,
-                f"Failed to connect to IBKR API on port {port} (Client ID {client_id})",
-            )
-    except Exception as e:
-        return False, f"Connection error: {e}"
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            ib.connect("127.0.0.1", int(port), clientId=int(client_id), timeout=5)
+            if ib.isConnected():
+                st.session_state.ibkr_ib = ib
+                return (
+                    True,
+                    f"Connected to IBKR API on port {port} (Client ID {client_id})",
+                )
+            else:
+                return (
+                    False,
+                    f"Failed to connect to IBKR API on port {port} (Client ID {client_id})",
+                )
+        except Exception as e:
+            err_str = str(e)
+            if "clientId" in err_str and "already in use" in err_str:
+                client_id = int(client_id) + 1
+                st.session_state.ibkr_last_client_id = client_id
+                continue
+            return False, f"Connection error: {e}"
+    return (
+        False,
+        f"Connection error: clientId {client_id} still in use after {max_attempts} attempts.",
+    )
 
 
 if st.sidebar.button("Connect to IBKR API", key="connect_ibkr_api"):
     connected, status = connect_ibkr_api(ibkr_port, ibkr_client_id)
     st.session_state.ibkr_connected = connected
     st.session_state.ibkr_status = status
+    # Store last used port/client_id for auto-reconnect
+    st.session_state.ibkr_last_port = ibkr_port
+    st.session_state.ibkr_last_client_id = ibkr_client_id
 
-st.sidebar.write(f"**Connection Status:** {st.session_state.ibkr_status}")
 
-# Disconnect button for IBKR API
 if st.sidebar.button("Disconnect from IBKR API", key="disconnect_ibkr_api"):
     ib = st.session_state.get("ibkr_ib")
+    disconnect_error = None
     if ib is not None:
         try:
-            # Check for pending requests or connection state
             if ib.isConnected():
                 ib.disconnect()
             try:
                 ib.shutdown()
             except Exception:
                 pass
-            st.session_state.ibkr_connected = False
+            # Double-check if still connected
+            if hasattr(ib, "isConnected") and ib.isConnected():
+                ib.disconnect()
+        except Exception as exc:
+            disconnect_error = exc
+        # Always clear session state reference
+        st.session_state.ibkr_ib = None
+        st.session_state.ibkr_connected = False
+        if disconnect_error:
+            st.session_state.ibkr_status = f"Error disconnecting: {disconnect_error}"
+            st.sidebar.error(f"Error disconnecting: {disconnect_error}")
+        elif hasattr(ib, "isConnected") and ib.isConnected():
+            st.session_state.ibkr_status = (
+                "Warning: IBKR API may still be connected. Please check TWS/Gateway."
+            )
+            st.sidebar.warning(
+                "IBKR API may still be connected. Please check TWS/Gateway."
+            )
+        else:
             st.session_state.ibkr_status = "Disconnected from IBKR API."
-            st.session_state.ibkr_ib = None
             st.sidebar.success("Disconnected from IBKR API.")
-        except Exception as e:
-            st.session_state.ibkr_connected = False
-            st.session_state.ibkr_status = f"Error disconnecting: {e}"
-            st.session_state.ibkr_ib = None
-            st.sidebar.error(f"Error disconnecting: {e}")
     else:
         st.session_state.ibkr_connected = False
         st.session_state.ibkr_status = "No active IBKR connection to disconnect."
         st.session_state.ibkr_ib = None
         st.sidebar.info("No active IBKR connection to disconnect.")
+
+# Always show the current IBKR connection status in the sidebar
+st.sidebar.markdown(f"**IBKR API Status:** {st.session_state.ibkr_status}")
+
+
+# Remove duplicate ibkr_port and ibkr_client_id widgets
 
 
 # --- IBKR Option Chain Fetch ---
@@ -137,8 +217,13 @@ def fetch_ibkr_expiries(symbol, exchange, currency, port, client_id):
     ib = st.session_state.get("ibkr_ib")
     if ib is None or not ib.isConnected():
         return [], "IBKR connection is not established. Please connect first."
+    from ib_insync import Stock
+
     try:
-        contracts = ib.reqSecDefOptParams(symbol, "", exchange, symbol)
+        stock = Stock(symbol, exchange, currency)
+        ib.qualifyContracts(stock)
+        # Now use correct arguments: symbol, '', secType, conId
+        contracts = ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
         if not contracts:
             return (
                 [],
@@ -162,14 +247,106 @@ if st.sidebar.button("Request Expiries", key="request_expiries"):
             st.session_state.ibkr_selected_expiry = expiries[0]
 
 
-# Step 2: Select Expiry
-if st.session_state.ibkr_expiries:
-    ibkr_expiry = st.sidebar.selectbox(
-        "Select Expiry", st.session_state.ibkr_expiries, index=0
+# --- LLM selector: Gemini or Ollama ---
+st.sidebar.subheader("Chatbot Choice")
+# Try to get Gemini API key from secrets.toml first
+GEMINI_API_KEY = None
+try:
+    GEMINI_API_KEY = st.secrets["gemini"]["api_key"]
+except Exception:
+    pass
+
+# Only show input box if secrets.toml is missing or does not contain the key
+if not GEMINI_API_KEY:
+    api_key_input = st.sidebar.text_input(
+        "Gemini API Key",
+        type="password",
+        help="Enter your Gemini API key. It will be stored only for this session.",
     )
-    st.session_state.ibkr_selected_expiry = ibkr_expiry
-else:
-    ibkr_expiry = ""
+    if api_key_input:
+        st.session_state["gemini_api_key"] = api_key_input
+        GEMINI_API_KEY = api_key_input
+    elif "gemini_api_key" in st.session_state and st.session_state["gemini_api_key"]:
+        GEMINI_API_KEY = st.session_state["gemini_api_key"]
+
+# LLM selector: Gemini or Ollama
+llm_choice = st.sidebar.selectbox(
+    "Choose LLM",
+    options=["Gemini", "Ollama"],
+    index=0,
+    help="Select which LLM to use for chat responses.",
+)
+
+# Ollama model selection (only shown if Ollama is selected)
+ollama_model = "gemma3"
+if llm_choice == "Ollama":
+    ollama_model = st.sidebar.text_input(
+        "Ollama Model",
+        value="llama2",
+        help="Enter the name of the Ollama model you want to use (e.g., llama2, phi3, mistral, etc.)",
+    )
+
+
+# --- LLM-based expiry suggestion ---
+
+from llm_utils import (
+    get_llm_expiry_suggestion,
+    query_gemini_flash,
+    query_ollama,
+    SYSTEM_SNIPPET,
+)
+
+
+ibkr_expiry = ""
+if st.sidebar.button("Suggest Expiry Date with LLM", key="suggest_expiry"):
+    suggested_expiry = get_llm_expiry_suggestion(
+        ibkr_symbol, llm_choice, ollama_model, GEMINI_API_KEY
+    )
+    if suggested_expiry:
+        st.session_state.ibkr_selected_expiry = suggested_expiry
+        st.sidebar.success(f"Suggested expiry: {suggested_expiry}")
+    else:
+        st.sidebar.warning("LLM did not return a valid expiry date.")
+
+import datetime
+
+if st.session_state.ibkr_expiries:
+    # Parse expiries into year, month, day
+    expiry_dates = [
+        datetime.datetime.strptime(e, "%Y-%m-%d")
+        for e in st.session_state.ibkr_expiries
+    ]
+    years = sorted(list(set([d.year for d in expiry_dates])))
+    selected_year = st.sidebar.selectbox("Year", years, key="expiry_year_selectbox")
+    months = sorted(
+        list(set([d.month for d in expiry_dates if d.year == selected_year]))
+    )
+    selected_month = st.sidebar.selectbox(
+        "Month",
+        months,
+        format_func=lambda m: datetime.date(1900, m, 1).strftime("%B"),
+        key="expiry_month_selectbox",
+    )
+    days = sorted(
+        list(
+            set(
+                [
+                    d.day
+                    for d in expiry_dates
+                    if d.year == selected_year and d.month == selected_month
+                ]
+            )
+        )
+    )
+    selected_day = st.sidebar.selectbox("Day", days, key="expiry_day_selectbox")
+    # Compose selected expiry
+    selected_expiry = f"{selected_year:04d}-{selected_month:02d}-{selected_day:02d}"
+    st.session_state.ibkr_selected_expiry = selected_expiry
+    ibkr_expiry = selected_expiry
+elif (
+    "ibkr_selected_expiry" in st.session_state and st.session_state.ibkr_selected_expiry
+):
+    ibkr_expiry = st.session_state.ibkr_selected_expiry
 
 
 def fetch_ibkr_option_chain(symbol, exchange, currency):
@@ -185,17 +362,22 @@ def fetch_ibkr_option_chain(symbol, exchange, currency):
             pd.DataFrame(),
             "IBKR connection is not established. Please connect first.",
         )
-    from ib_insync import Stock, Option, util
+    from ib_insync import Stock, Option
 
     try:
         stock = Stock(symbol, exchange, currency)
         ib.qualifyContracts(stock)
-        [ticker] = ib.reqTickers(stock)
+        ib.reqMarketDataType(3)  # Request delayed market data
+        ticker = ib.reqMktData(stock, "", False, False)
         market_price = ticker.marketPrice()
 
-        chains = ib.reqSecDefOptParams(symbol, "", stock.secType, stock.conId)
+        chains = ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
         chain = next(
-            (c for c in chains if c.tradingClass == symbol and c.exchange == exchange),
+            (
+                c
+                for c in chains
+                if c.tradingClass == stock.symbol and c.exchange == exchange
+            ),
             None,
         )
         if not chain:
@@ -212,28 +394,42 @@ def fetch_ibkr_option_chain(symbol, exchange, currency):
         expirations = sorted(exp for exp in chain.expirations)[:3]
         rights = ["C", "P"]
         contracts = [
-            Option(symbol, expiration, strike, right, exchange, tradingClass=symbol)
+            Option(
+                stock.symbol,
+                expiration,
+                strike,
+                right,
+                exchange,
+                tradingClass=stock.symbol,
+            )
             for right in rights
             for expiration in expirations
             for strike in strikes
         ]
         contracts = ib.qualifyContracts(*contracts)
-        tickers = ib.reqTickers(*contracts)
-        contractData = [
-            (
-                t.contract.lastTradeDateOrContractMonth,
-                t.contract.strike,
-                t.contract.right,
-                t.time,
-                t.close,
-                market_price,
-            )
-            for t in tickers
-            if t.contract is not None
-        ]
+
+        # Request market data for each contract individually
+        contractData = []
+        for idx, contract in enumerate(contracts):
+            try:
+                ib.reqMarketDataType(3)  # Request delayed market data for each contract
+                ticker = ib.reqMktData(contract, "", True, False)
+                ib.sleep(0.2)  # Small delay to avoid rate limit
+                contractData.append(
+                    (
+                        contract.lastTradeDateOrContractMonth,
+                        contract.strike,
+                        contract.right,
+                        ticker.time,
+                        ticker.close,
+                        market_price,
+                    )
+                )
+            except Exception:
+                continue
         fields = ["expiration", "strike", "right", "time", "close", "undPrice"]
-        df = pd.DataFrame([dict(zip(fields, t)) for t in contractData])
-        return df, None
+        df_chain = pd.DataFrame([dict(zip(fields, t)) for t in contractData])
+        return df_chain, None
     except Exception as e:
         return (
             pd.DataFrame(),
@@ -242,20 +438,110 @@ def fetch_ibkr_option_chain(symbol, exchange, currency):
 
 
 fetch_enabled = st.session_state.get("ibkr_connected", False)
+
+
 if st.sidebar.button("Fetch Option Chain from IBKR", disabled=not fetch_enabled):
     with st.spinner(f"Fetching option chain for {ibkr_symbol} from IBKR..."):
-        df_ibkr, err = fetch_ibkr_option_chain(
-            ibkr_symbol,
-            ibkr_exchange,
-            ibkr_currency,
-        )
-        if err:
-            st.error(f"IBKR Error: {err}")
-        elif not df_ibkr.empty:
-            st.subheader(f"IBKR Option Chain for {ibkr_symbol}")
-            st.dataframe(df_ibkr)
+        # Progress bar setup
+        progress_bar = st.sidebar.progress(0, text="Fetching option chain...")
+
+        # Ensure event loop is set
+        import asyncio
+
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+        ib = st.session_state.get("ibkr_ib")
+        if ib is None or not ib.isConnected():
+            st.error("IBKR connection is not established. Please connect first.")
         else:
-            st.info("No option chain data found.")
+            from ib_insync import Stock, Option, util
+
+            try:
+                stock = Stock(ibkr_symbol, ibkr_exchange, ibkr_currency)
+                ib.qualifyContracts(stock)
+                [ticker] = ib.reqTickers(stock)
+                market_price = ticker.marketPrice()
+
+                chains = ib.reqSecDefOptParams(
+                    stock.symbol, "", stock.secType, stock.conId
+                )
+                chain = next(
+                    (
+                        c
+                        for c in chains
+                        if c.tradingClass == stock.symbol
+                        and c.exchange == ibkr_exchange
+                    ),
+                    None,
+                )
+                if not chain:
+                    st.error(
+                        f"No option chain found for symbol '{ibkr_symbol}' on exchange '{ibkr_exchange}'."
+                    )
+                else:
+                    strikes = [
+                        strike
+                        for strike in chain.strikes
+                        if strike % 5 == 0
+                        and market_price - 20 < strike < market_price + 20
+                    ]
+                    expirations = sorted(exp for exp in chain.expirations)[:3]
+                    rights = ["C", "P"]
+                    contracts = [
+                        Option(
+                            stock.symbol,
+                            expiration,
+                            strike,
+                            right,
+                            ibkr_exchange,
+                            tradingClass=stock.symbol,
+                        )
+                        for right in rights
+                        for expiration in expirations
+                        for strike in strikes
+                    ]
+                    contracts = ib.qualifyContracts(*contracts)
+                    total = len(contracts)
+                    contractData = []
+                    for idx, contract in enumerate(contracts):
+                        ticker_list = ib.reqTickers(contract)
+                        if ticker_list:
+                            t = ticker_list[0]
+                            contractData.append(
+                                (
+                                    t.contract.lastTradeDateOrContractMonth,
+                                    t.contract.strike,
+                                    t.contract.right,
+                                    t.time,
+                                    t.close,
+                                    market_price,
+                                )
+                            )
+                        # Update progress bar
+                        progress_bar.progress(
+                            int((idx + 1) / total * 100),
+                            text=f"Progress: {int((idx + 1) / total * 100)}%",
+                        )
+                    fields = [
+                        "expiration",
+                        "strike",
+                        "right",
+                        "time",
+                        "close",
+                        "undPrice",
+                    ]
+                    df_ibkr = pd.DataFrame([dict(zip(fields, t)) for t in contractData])
+                    progress_bar.empty()
+                    if not df_ibkr.empty:
+                        st.subheader(f"IBKR Option Chain for {ibkr_symbol}")
+                        st.dataframe(df_ibkr)
+                    else:
+                        st.info("No option chain data found.")
+            except Exception as e:
+                st.error(f"IBKR Error: {e}")
 
 
 st.sidebar.subheader("Chatbot Choice")
@@ -310,6 +596,7 @@ llm_choice = st.sidebar.selectbox(
     options=["Gemini", "Ollama"],
     index=0,
     help="Select which LLM to use for chat responses.",
+    key="llm_choice_selectbox",
 )
 
 # Ollama model selection (only shown if Ollama is selected)
@@ -328,51 +615,6 @@ if st.sidebar.button("New Chat", key="new_chat"):
     st.session_state.chat_time_end = None
 
 user_prompt = st.sidebar.text_area("You:")
-
-
-# Gemini API call
-def query_gemini_flash(prompt, api_key):
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-    headers = {"Content-Type": "application/json", "X-goog-api-key": api_key}
-    context = SYSTEM_SNIPPET + "\n" + prompt
-    data = {"contents": [{"parts": [{"text": context}]}]}
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code == 200:
-        result = response.json()
-        try:
-            return result["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception:
-            return str(result)
-    else:
-        return f"Errore HTTP: {response.status_code} - {response.text}"
-
-
-# Ollama API call
-def query_ollama(prompt, model_name):
-    url = "http://localhost:11434/api/generate"
-    context = SYSTEM_SNIPPET + "\n" + prompt
-    data = {"model": model_name, "prompt": context}
-    try:
-        response = requests.post(url, json=data, timeout=60, stream=True)
-        if response.status_code == 200:
-            responses = []
-            for line in response.iter_lines():
-                if line:
-                    try:
-                        obj = json.loads(line.decode("utf-8"))
-                        if "response" in obj:
-                            responses.append(obj["response"])
-                    except Exception:
-                        pass
-            return (
-                " ".join(responses).replace("  ", " ").strip()
-                if responses
-                else "No response from Ollama."
-            )
-        else:
-            return f"Ollama Error: {response.status_code} - {response.text}"
-    except Exception as e:
-        return f"Ollama Exception: {e}"
 
 
 # Chatbot interaction
