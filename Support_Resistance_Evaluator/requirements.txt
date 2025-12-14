@@ -5,5 +5,5 @@ plotly
 yfinance
 requests
 scipy
-google-generativeai 
 toml
+python-dotenv

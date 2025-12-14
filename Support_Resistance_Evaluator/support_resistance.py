@@ -1,8 +1,17 @@
-import yfinance as yf
-import pandas as pd
+import json
+
 import numpy as np
+import pandas as pd
 import streamlit as st
-from modules.llm_utils import setup_llm, get_options_advice
+import yfinance as yf
+from modules.llm_utils import (
+    get_gemini_api_key,
+    init_chat_state,
+    new_chat,
+    query_gemini_flash,
+    render_chat,
+    save_gemini_api_key,
+)
 
 
 def find_pivots(series: pd.Series, pivot_window: int, min_points: int = 500):
@@ -53,8 +62,8 @@ def cluster_levels(
 ):
     """Cluster nearby levels into averaged levels.
 
-    If `cluster_tol_abs` is provided, use absolute distance. Otherwise use relative
-    tolerance `tol_rel` (fractional).
+    If cluster_tol_abs is provided, use absolute distance. Otherwise use relative
+    tolerance tol_rel (fractional).
     """
     if not levels:
         return []
@@ -117,219 +126,269 @@ def prepare_plot_df(
 # --- Streamlit UI ---
 st.title("Support & Resistance — Visualizzazione Storica")
 
-# Inizializzazione efficiente dello stato
-if "app_state" not in st.session_state:
-    st.session_state.app_state = {
-        "llm_model": None,
-        "chat": {"messages": [], "last_analysis": None},
-        "data": {"ticker": None, "price": None, "resistances": [], "supports": []},
+# --- Gemini API key management (via llm_utils) ---
+st.sidebar.markdown("---")
+st.sidebar.header("Gemini API Key")
+current_key = get_gemini_api_key()
+masked = (
+    (current_key[:4] + "..." + current_key[-4:])
+    if current_key and len(current_key) > 8
+    else "(none)"
+)
+st.sidebar.write(f"Key attuale: {masked}")
+new_key = st.sidebar.text_input(
+    "Incolla qui la Gemini API Key (visibile solo a te)", value=""
+)
+if st.sidebar.button("Salva API Key"):
+    ok = save_gemini_api_key(new_key.strip())
+    if ok:
+        st.sidebar.success("API Key salvata.")
+    else:
+        st.sidebar.error("Errore nel salvare la API Key.")
+
+if st.sidebar.button("Rimuovi API Key"):
+    ok = save_gemini_api_key(None)
+    if ok:
+        st.sidebar.success("API Key rimossa.")
+    else:
+        st.sidebar.error("Errore nella rimozione della API Key.")
+
+# Expose the currently stored key to the session for later use by other UI actions
+st.session_state["gemini_api_key"] = get_gemini_api_key()
+
+# Keep API key controls above; chat UI will be rendered after the ticker so it can be dynamic
+
+ticker = st.text_input("Ticker (es. AAPL)", value="DUOL").strip().upper()
+period = st.selectbox(
+    "Periodo storico", ["5y", "1y", "2y", "6mo", "3mo", "1mo", "5d"], index=0
+)
+window = st.slider("Finestra (giorni) per pivot locale (prima/dopo)", 1, 60, 14)
+tol_type = st.radio(
+    "Tipo di tolleranza per raggruppamento livelli",
+    ("relativa (%)", "assoluta (valore)"),
+)
+if tol_type == "relativa (%)":
+    tol_rel = st.slider("Tolleranza relativa (%)", 0.1, 10.0, 0.5) / 100.0
+    tol_abs = None
+else:
+    tol_abs = st.number_input("Tolleranza assoluta (es. 0.5)", min_value=0.0, value=0.5)
+    tol_rel = 0.005
+
+debug = st.checkbox("Mostra debug step-by-step", value=False)
+
+# --- Sidebar chat UI (rendered after having ticker input so it can be dynamic) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("Ask Gemini about this SR analysis")
+sidebar_gemini_key = st.session_state.get("gemini_api_key")
+
+# Example loader to test chat quickly
+if st.sidebar.button("Carica esempio SR (DUOL)"):
+    st.session_state["sr_summary"] = {
+        "ticker": "DUOL",
+        "period": "5y",
+        "resistances": [
+            529.9080078125,
+            238.5980010986328,
+            229.3220001220703,
+            103.14499855041504,
+        ],
+        "supports": [
+            68.2959991455078,
+            72.38999938964844,
+            129.75800018310548,
+            167.31199951171874,
+            177.11249923706055,
+            279.8279968261719,
+        ],
     }
-
-# Inizializza LLM solo se necessario
-if not st.session_state.app_state["llm_model"]:
-    try:
-        st.session_state.app_state["llm_model"] = setup_llm()
-    except Exception as e:
-        st.error(f"Errore configurazione LLM: {str(e)}")
-
-# Layout UI ottimizzato
-col1, col2 = st.columns([3, 1])
-with col1:
-    ticker = st.text_input("Ticker (es. AAPL)", value="DUOL").strip().upper()
-    period = st.selectbox(
-        "Periodo storico", ["1y", "2y", "6mo", "3mo", "1mo", "5y"], index=0
+    st.session_state["gemini_prefill_prompt"] = (
+        "Given the support and resistance levels for DUOL, give concise trading suggestions: entry points, stop-loss guidance, target levels, and risk management."
     )
-    window = st.slider("Finestra (giorni) per pivot locale (prima/dopo)", 1, 60, 14)
 
-with col2:
-    tol_type = st.radio("Tipo di tolleranza", ("relativa (%)", "assoluta (valore)"))
-    if tol_type == "relativa (%)":
-        tol_rel = st.slider("Tolleranza (%)", 0.1, 10.0, 0.5) / 100.0
-        tol_abs = None
+init_chat_state()
+
+if sidebar_gemini_key:
+    sr_preview = st.session_state.get("sr_summary")
+    # Show dynamic context relative to the current ticker
+    if sr_preview and sr_preview.get("ticker") == ticker:
+        st.sidebar.write(
+            f"Context: Ticker={sr_preview.get('ticker')}, Resistances={sr_preview.get('resistances')}, Supports={sr_preview.get('supports')}"
+        )
+    elif sr_preview:
+        st.sidebar.write(
+            f"Last computed SR (ticker={sr_preview.get('ticker')}). Compute for {ticker} to update context."
+        )
     else:
-        tol_abs = st.number_input("Tolleranza", min_value=0.0, value=0.5)
-        tol_rel = 0.005
+        st.sidebar.info(
+            "Nessun SR summary ancora disponibile. Esegui prima il calcolo."
+        )
 
-debug = st.checkbox("Debug mode", value=False)
+    # Chat control buttons
+    if st.sidebar.button("Nuova chat"):
+        new_chat()
+        st.sidebar.success("Nuova chat avviata.")
+    if st.sidebar.button("Pulisci storico chat"):
+        new_chat()
+        st.sidebar.success("Cronologia cancellata.")
 
-# Tabs per separare analisi e chat
-tab1, tab2 = st.tabs(["📊 Analisi Tecnica", "💬 Chat Analista"])
-
-with tab1:
-    if st.button("Calcola Livelli"):
-        if not ticker:
-            st.error("Inserisci un ticker valido.")
-        else:
-            try:
-                # Download e preparazione dati
-                with st.spinner("Scaricamento dati..."):
-                    data = yf.download(ticker, period=period, progress=False)
-                    if data is None or data.empty or "Close" not in data.columns:
-                        st.error("Dati non disponibili per questo ticker.")
-                    else:
-                        close = data["Close"].dropna()
-                        close.index = pd.to_datetime(close.index)
-
-                        if len(close) < 2 * window + 1:
-                            st.warning(
-                                "Serie troppo corta per la finestra selezionata."
-                            )
-
-                        else:
-                            # Calcolo livelli
-                            res_pivots, sup_pivots = find_pivots(close, window)
-                            if debug:
-                                st.write(
-                                    "Pivot trovati:", len(res_pivots) + len(sup_pivots)
-                                )
-
-                            # Clusterizza i livelli
-                            clustered_res = cluster_levels(
-                                res_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
-                            )
-                            clustered_sup = cluster_levels(
-                                sup_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
-                            )
-
-                            # Grafico
-                            plot_df = prepare_plot_df(
-                                close, clustered_res, clustered_sup
-                            )
-                            st.line_chart(plot_df)
-
-                            # Livelli
-                            col3, col4 = st.columns(2)
-                            with col3:
-                                st.subheader("⬆️ Resistenze")
-                                for i, r in enumerate(
-                                    sorted(clustered_res, reverse=True), 1
-                                ):
-                                    st.write(f"R{i}: ${r:.4f}")
-
-                            with col4:
-                                st.subheader("⬇️ Supporti")
-                                for i, s in enumerate(sorted(clustered_sup), 1):
-                                    st.write(f"S{i}: ${s:.4f}")
-
-                            # Export CSV
-                            res_list = (
-                                sorted(clustered_res, reverse=True)
-                                if clustered_res
-                                else []
-                            )
-                            sup_list = sorted(clustered_sup) if clustered_sup else []
-                            max_len = max(len(res_list), len(sup_list))
-                            res_list.extend([None] * (max_len - len(res_list)))
-                            sup_list.extend([None] * (max_len - len(sup_list)))
-
-                            # Export CSV
-                            levels_df = pd.DataFrame(
-                                {
-                                    "resistances": res_list,
-                                    "supports": sup_list,
-                                }
-                            )
-                            csv = levels_df.to_csv(index=False, na_rep="")
-                            st.download_button(
-                                "Scarica livelli (CSV)",
-                                data=csv,
-                                file_name=f"{ticker}_levels.csv",
-                            )
-
-                            # Aggiorna stato per la chat
-                            st.session_state.app_state["data"].update(
-                                {
-                                    "ticker": ticker,
-                                    "price": float(close.iloc[-1]),
-                                    "resistances": clustered_res,
-                                    "supports": clustered_sup,
-                                }
-                            )
-                            # Reset chat solo se cambiano i dati
-                            if st.session_state.app_state["chat"]["messages"]:
-                                st.session_state.app_state["chat"]["messages"] = []
-                                st.session_state.app_state["chat"][
-                                    "last_analysis"
-                                ] = None
-
-            except Exception as e:
-                st.error(f"Errore nell'elaborazione: {str(e)}")
-
-with tab2:
-    if not st.session_state.app_state["data"]["ticker"]:
-        st.warning("🔍 Prima calcola i livelli tecnici")
-    else:
-        chat_col1, chat_col2 = st.columns([2, 1])
-
-        with chat_col1:
-            st.markdown("### 💬 Conversazione")
-            for msg in st.session_state.app_state["chat"]["messages"]:
-                st.markdown("---")
-                if msg["role"] == "user":
-                    st.markdown(f"**👤 Tu**: {msg['content']}")
+with st.sidebar.form("gemini_chat_form", clear_on_submit=False):
+        user_prompt_side = st.text_area(
+            "Prompt per Gemini:",
+            value=st.session_state.get("gemini_prefill_prompt", ""),
+            height=120,
+        )
+        submit_side = st.form_submit_button("Send to Gemini")
+        if submit_side:
+            if not (user_prompt_side or "").strip():
+                st.sidebar.error("Inserisci un prompt prima di inviare.")
+            else:
+                # pick the sr_summary that matches the current ticker if available
+                sr_preview = st.session_state.get("sr_summary")
+                if not sr_preview or sr_preview.get("ticker") != ticker:
+                    st.sidebar.error(
+                        "Il contesto SR non è aggiornato per questo ticker. Esegui il calcolo prima di inviare."
+                    )
                 else:
-                    st.markdown(msg["content"])
+                    with st.spinner("Interrogating Gemini..."):
+                        try:
+                            context_data = json.dumps(sr_preview)
+                            ai_response = query_gemini_flash(
+                                user_prompt_side,
+                                sidebar_gemini_key,
+                                context_data=context_data,
+                            )
+                            st.session_state.setdefault("chat_history", []).append(
+                                ("user", user_prompt_side)
+                            )
+                            st.session_state.setdefault("chat_history", []).append(
+                                ("ai", ai_response)
+                            )
+                            st.sidebar.success("Risposta ricevuta.")
+                            st.sidebar.write(ai_response)
+                        except Exception as e:
+                            st.sidebar.error(f"Errore nella chiamata LLM: {e}")
+else:
+    st.sidebar.info("Incolla la Gemini API Key per abilitare il chat")
 
-        with chat_col2:
-            state = st.session_state.app_state
+if st.button("Calcola e mostra supporti/resistenze"):
+    if not ticker:
+        st.error("Inserisci un ticker valido.")
+    else:
+        try:
+            valid_data = True
+            data = None
+            close = None
 
-            # Mostra dati tecnici attuali
-            st.markdown("### 📊 Livelli Attuali")
-            st.markdown(
-                f"**{state['data']['ticker']} - ${state['data']['price']:.2f}**"
-            )
-            st.markdown("**Resistenze**:")
-            for r in sorted(state["data"]["resistances"], reverse=True):
-                st.markdown(f"- ${r:.2f}")
-            st.markdown("**Supporti**:")
-            for s in sorted(state["data"]["supports"]):
-                st.markdown(f"- ${s:.2f}")
+            # 1) Download dei dati
+            try:
+                data = yf.download(ticker, period=period, progress=False)
+                if data is None or getattr(data, "empty", True):
+                    st.error("Impossibile scaricare i dati per il ticker richiesto.")
+                    valid_data = False
+            except (ValueError, KeyError) as e:
+                st.error(f"Errore durante il download dei dati: {str(e)}")
+                valid_data = False
 
-            # Controlli chat
-            st.markdown("### 🤖 Azioni")
-            if st.button("🔄 Nuova Analisi"):
-                with st.spinner("Analisi in corso..."):
+            if valid_data:
+                if data is None or "Close" not in data.columns:
+                    st.error("Colonna Close non presente nei dati scaricati.")
+                    valid_data = False
+                else:
+                    # 2) Preparazione serie temporale
+                    close = data["Close"].dropna()
+                    close.index = pd.to_datetime(close.index)
+                    if debug:
+                        st.write("Dati Close (prime righe):")
+                        st.dataframe(close.head(10))
+
+                    if len(close) < 2 * window + 1:
+                        st.warning(
+                            "Serie troppo corta per la finestra richiesta. Riduci la finestra o scegli un periodo più lungo."
+                        )
+                        valid_data = False
+
+            if valid_data and close is not None:
+                # 3) Trova pivot locali
+                res_pivots, sup_pivots = find_pivots(close, window)
+                if debug:
+                    st.write("Pivot (raw) - resistenze:", res_pivots)
+                    st.write("Pivot (raw) - supporti:", sup_pivots)
+
+# 4) Clusterizza i livelli vicini
+                clustered_res = cluster_levels(
+                    res_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
+                )
+                clustered_sup = cluster_levels(
+                    sup_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
+                )
+                if debug:
+                    st.write("Resistenze clusterizzate:", clustered_res)
+                    st.write("Supporti clusterizzati:", clustered_sup)
+
+                # 5) Prepara DataFrame e mostra grafico
+                plot_df = prepare_plot_df(close, clustered_res, clustered_sup)
+                st.line_chart(plot_df)
+
+                # 6) Mostra livelli tabellati
+                st.subheader("Livelli di Resistenza (dall'alto verso il basso)")
+                if clustered_res:
+                    for i, r in enumerate(sorted(clustered_res, reverse=True), start=1):
+                        st.write(f"R{i}: {r:.4f}")
+                else:
+                    st.write("Nessuna resistenza trovata.")
+
+                st.subheader("Livelli di Supporto (dal basso verso l'alto)")
+                if clustered_sup:
+                    for i, s in enumerate(sorted(clustered_sup), start=1):
+                        st.write(f"S{i}: {s:.4f}")
+                else:
+                    st.write("Nessun supporto trovato.")
+
+                # 7) Export CSV
+                # Prepara liste di uguale lunghezza aggiungendo None per bilanciare
+                res_list = sorted(clustered_res, reverse=True) if clustered_res else []
+                sup_list = sorted(clustered_sup) if clustered_sup else []
+                max_len = max(len(res_list), len(sup_list))
+                res_list.extend([None] * (max_len - len(res_list)))
+                sup_list.extend([None] * (max_len - len(sup_list)))
+
+                levels_df = pd.DataFrame(
+                    {
+                        "resistances": res_list,
+                        "supports": sup_list,
+                    }
+                )
+                csv = levels_df.to_csv(index=False, na_rep="")
+                st.download_button(
+                    "Scarica livelli (CSV)", data=csv, file_name=f"{ticker}_levels.csv"
+                )
+
+                # Save summary into session_state so LLM chat can use it
+                sr_summary = {
+                    "ticker": ticker,
+                    "period": period,
+                    "resistances": sorted(clustered_res, reverse=True),
+                    "supports": sorted(clustered_sup),
+                }
+                st.session_state["sr_summary"] = sr_summary
+                # Chat UI is handled in the sidebar to avoid re-running the main calculation
+                # Show chat history in the main area (if any)
+                if st.session_state.get("chat_history"):
+                    st.markdown("---")
+                    st.subheader("Chat history")
                     try:
-                        advice = get_options_advice(
-                            model=state["llm_model"],
-                            ticker=state["data"]["ticker"],
-                            current_price=state["data"]["price"],
-                            resistances=sorted(
-                                state["data"]["resistances"], reverse=True
-                            ),
-                            supports=sorted(state["data"]["supports"]),
-                        )
-                        state["chat"]["messages"].append(
-                            {"role": "assistant", "content": advice}
-                        )
-                        state["chat"]["last_analysis"] = advice
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore analisi: {str(e)}")
+                        render_chat()
+                    except Exception:
+                        # Fallback simple rendering
+                        for who, msg in st.session_state.get("chat_history", []):
+                            if who == "system":
+                                continue
+                            elif who == "user":
+                                st.write(f"You: {msg}")
+                            else:
+                                st.write(f"Gemini: {msg}")
 
-            question = st.text_input("💭 La tua domanda:", key="question")
-            if st.button("📤 Invia") and question:
-                state["chat"]["messages"].append({"role": "user", "content": question})
-                with st.spinner("Elaborazione..."):
-                    try:
-                        response = get_options_advice(
-                            model=state["llm_model"],
-                            ticker=state["data"]["ticker"],
-                            current_price=state["data"]["price"],
-                            resistances=state["data"]["resistances"],
-                            supports=state["data"]["supports"],
-                            context=state["chat"]["last_analysis"],
-                            is_follow_up=True,
-                            follow_up_question=question,
-                        )
-                        state["chat"]["messages"].append(
-                            {"role": "assistant", "content": response}
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore: {str(e)}")
-
-            if st.button("🗑️ Reset Chat"):
-                state["chat"]["messages"] = []
-                state["chat"]["last_analysis"] = None
-                st.rerun()
+        except (ValueError, KeyError) as e:
+            st.error(f"Si è verificato un errore durante l'elaborazione: {str(e)}")
+        except Exception:
+            st.error("Errore imprevisto durante l'elaborazione.")

@@ -1,2 +1,6 @@
-modules/__pycache__/*.pyc
+.env
 .venv/*
+pycache/*
+*.pyc
+.DS_Store
+api_key/*
