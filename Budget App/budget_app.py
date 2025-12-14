@@ -1,11 +1,24 @@
 """Budget App"""
+import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from dotenv import load_dotenv
+
+# Carica variabili d'ambiente
+load_dotenv()
+
+# Import AI Provider
+try:
+    from agents.ai_provider import AIProvider
+except ImportError:
+    st.error("Modulo 'agents.ai_provider' non trovato. Verifica che la cartella 'agents' esista.")
+    AIProvider = None # Fallback prevents crash but disables AI
 
 # Configurazione Pagina
 st.set_page_config(page_title="Budget Manager", page_icon="💰", layout="wide")
+
 
 DATA_FILE = 'budget_database.csv'
 
@@ -32,7 +45,7 @@ def calculate_metrics(df):
     cols = df.columns.tolist()
     
     # Colonne da escludere dai calcoli di somma (metadati o colonne calcolate esistenti)
-    excluded_from_sum = ['Year', 'MonthNum', 'Month', 'Notes', 'Reddito meno spese', 'Risparmio %']
+    excluded_from_sum = ['Year', 'MonthNum', 'Month', 'Notes', 'Reddito meno spese', 'Risparmio %', 'Totale Entrate', 'Totale Uscite']
     
     # Definisci esplicitamente le entrate (evita match parziali errati)
     income_cols = ['Stipendio', 'Reddito aggiuntivo']
@@ -67,7 +80,7 @@ if not df.empty:
     df, expense_cols, income_cols = calculate_metrics(df)
 
     # Sidebar per navigazione
-    page = st.sidebar.radio("Navigazione", ["Dashboard", "Gestione Dati", "Aggiungi Mese"])
+    page = st.sidebar.radio("Navigazione", ["Dashboard", "Gestione Dati", "Gestione Mese", "💬 Assistant AI"])
 
     # --- PAGINA DASHBOARD ---
     # --- PAGINA DASHBOARD ---
@@ -97,7 +110,46 @@ if not df.empty:
         # Ri-ordiniamo decrescente per la visualizzazione (Mese corrente in alto)
         df = df_sorted_asc.sort_values('DateObj', ascending=False)
         
-        # --- 1. FILTRI (Sidebar) ---
+        # --- 1. SETTINGS INTELLIGENZA ARTIFICIALE (Sidebar) ---
+        st.sidebar.divider()
+        with st.sidebar.expander("🤖 Configurazione AI", expanded=False):
+            provider_type = st.selectbox("Provider", ["Gemini", "Ollama"], index=0)
+            
+            api_key = None
+            model_name = None
+            
+            if provider_type == "Gemini":
+                # Recupera API Key da Env o Input
+                env_key = os.getenv("GOOGLE_API_KEY")
+                api_key = st.text_input("Gemini API Key", value=env_key if env_key else "", type="password", help="Se presente nel file .env verra' caricata automaticamente")
+                
+                # Recupera lista modelli da AIProvider
+                gemini_models = AIProvider.FALLBACK_ORDER
+                model_name = st.selectbox("Modello", gemini_models, index=0)
+            else:
+                # Ollama
+                if AIProvider:
+                    ollama_models = AIProvider.get_ollama_models()
+                    if ollama_models:
+                        model_name = st.selectbox("Modello Locale", ollama_models, index=0)
+                    else:
+                        st.warning("Nessun modello Ollama trovato o Ollama non in esecuzione.")
+                        model_name = st.text_input("Nome Modello Manuale", value="llama3")
+
+            # Inizializza Provider nel Session State
+            if st.button("Applica Configurazione AI"):
+                if AIProvider:
+                    try:
+                        st.session_state['ai_provider'] = AIProvider(
+                            api_key=api_key, 
+                            provider_type=provider_type, 
+                            model_name=model_name
+                        )
+                        st.toast(f"AI Attivata: {provider_type} ({model_name})", icon="🟢")
+                    except Exception as e:
+                        st.error(f"Errore Init AI: {e}")
+
+        # --- 2. FILTRI TEMPORALI (Sidebar) ---
         st.sidebar.divider()
         st.sidebar.subheader("📅 Filtri Temporali")
         
@@ -259,7 +311,7 @@ if not df.empty:
         
         with c_donut:
             st.subheader("🍩 Breakdown Spese")
-            # Filter > 0
+            # Filter > 0 per il grafico a Torta (i negativi rompono la visualizzazione settori)
             pie_data = expenses_only[expenses_only > 0]
             
             fig_pie = px.pie(
@@ -280,26 +332,37 @@ if not df.empty:
         with c_details:
             st.subheader("📋 Dettaglio Spese")
             
-            # Ordina spese
-            sorted_expenses = pie_data.sort_values(ascending=False).to_frame(name="Importo")
-            total_expenses = float(selected_row['Totale Uscite'])
+            # Per la TABELLA includiamo anche i valori negativi (Rimborsi/Storni)
+            # Filter != 0 (escludiamo solo gli zero assoluti)
+            table_data = expenses_only[expenses_only != 0]
             
-            if total_expenses > 0:
-                sorted_expenses['%'] = ((sorted_expenses['Importo'] / total_expenses * 100).astype(float).round(1).astype(str) + '%')
+            # Ordina spese (dal più costoso al più "negativo")
+            sorted_expenses = table_data.sort_values(ascending=False).to_frame(name="Importo")
+            
+            # Usa la somma delle spese POSITIVE come denominatore per la %
+            # Questo permette di avere % sensate per le spese vere, e % negative per i rimborsi (es. -10% rispetto allo speso)
+            total_positive_expenses = expenses_only[expenses_only > 0].sum()
+            
+            if total_positive_expenses > 0:
+                sorted_expenses['%'] = ((sorted_expenses['Importo'] / total_positive_expenses * 100).astype(float).round(1).astype(str) + '%')
             else:
                  sorted_expenses['%'] = "0%"
 
-            # Top 5 Table
+            # Top 5 Voci (Spese più alte)
             st.write("**Top 5 Voci**")
             st.dataframe(
                 sorted_expenses.head(5).style.format({'Importo': '€ {:,.2f}'}), 
                 width='stretch',
-                height=250 # Ridotto altezza
+                height=250
             )
             
-            # Altre Spese (se ce ne sono)
+            # Altre Spese & Rimborsi (tutto il resto)
             if len(sorted_expenses) > 5:
-                with st.expander("🔍 Altre Spese"):
+                # Se ci sono valori negativi spesso finiscono in fondo
+                has_negatives = (sorted_expenses['Importo'] < 0).any()
+                label_expander = "🔍 Altre Spese e Rimborsi" if has_negatives else "🔍 Altre Spese"
+                
+                with st.expander(label_expander):
                     st.dataframe(
                         sorted_expenses.iloc[5:].style.format({'Importo': '€ {:,.2f}'}), 
                         width='stretch'
@@ -414,41 +477,81 @@ if not df.empty:
             save_data(edited_df)
             st.rerun()
 
-    # --- PAGINA AGGIUNGI MESE ---
-    elif page == "Aggiungi Mese":
-        st.header("➕ Aggiungi Nuovo Mese")
+    # --- PAGINA GESTIONE MESE (AGGIUNGI/INCREMENTA) ---
+    elif page == "Gestione Mese":
+        st.header("➕ Gestione Mese")
+        st.write("Seleziona il mese e l'anno. Se il mese esiste già, potrai **aggiungere** importi a quelli esistenti (incrementale). Se non esiste, verrà creato.")
         
-        with st.form("new_month_form"):
-            col_y, col_m = st.columns(2)
-            year_input = col_y.number_input("Anno", min_value=2020, max_value=2030, value=2025)
-            month_input = col_m.selectbox("Mese", list(df['Month'].unique())) # Usa i nomi dei mesi esistenti
-            
-            # Mappa inversa per trovare il numero del mese
-            month_map = {'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6,
-                         'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12}
-            month_num = month_map.get(month_input, 1)
+        # Selezione Periodo (fuori dal form per permettere refresh logico)
+        col_y, col_m = st.columns(2)
+        today = pd.Timestamp.now()
+        year_input = col_y.number_input("Anno", min_value=2020, max_value=2030, value=today.year)
+        month_input = col_m.selectbox("Mese", list(df['Month'].unique()), index=today.month - 1 if today.month <= 12 else 0)
 
-            st.subheader("Entrate")
+        # Mappa inversa per trovare il numero del mese
+        month_map = {'January': 1, 'February': 2, 'March': 3, 'April': 4, 'May': 5, 'June': 6,
+                        'July': 7, 'August': 8, 'September': 9, 'October': 10, 'November': 11, 'December': 12}
+        month_num = month_map.get(month_input, 1)
+
+        # Check esistenza
+        existing_mask = (df['Year'] == year_input) & (df['Month'] == month_input)
+        is_existing = df[existing_mask].any().any() # Check if any row matches
+        
+        existing_row = None
+        if is_existing:
+            existing_row = df[existing_mask].iloc[0]
+            st.info(f"📅 **Mese Trovato:** {month_input} {year_input}. **Modalità Incrementale Attiva** (Gli importi inseriti verranno SOMMATI a quelli attuali).")
+            # Mostra riepilogo attuale
+            with st.expander("Vedi Valori Attuali", expanded=False):
+                st.dataframe(existing_row.to_frame().T)
+        else:
+            st.success(f"✨ **Nuovo Mese:** {month_input} {year_input}. **Modalità Creazione**.")
+
+        with st.form("month_manage_form"):
+            st.subheader("Entrate (Aggiungi)")
             new_incomes = {}
             cols = st.columns(len(income_cols))
             for i, col_name in enumerate(income_cols):
-                new_incomes[col_name] = cols[i%len(cols)].number_input(col_name, value=0.0, step=100.0)
+                base_val = 0.0
+                curr_label = ""
+                if is_existing:
+                    curr_val = existing_row[col_name]
+                    curr_label = f" (Attuale: €{curr_val:,.2f})"
+                
+                new_incomes[col_name] = cols[i%len(cols)].number_input(f"{col_name}{curr_label}", value=0.0, step=100.0)
 
-            st.subheader("Uscite")
+            st.subheader("Uscite (Aggiungi)")
             new_expenses = {}
             # Creiamo una griglia per le spese
             cols = st.columns(3) 
             for i, col_name in enumerate(expense_cols):
-                new_expenses[col_name] = cols[i%3].number_input(col_name, value=0.0, step=50.0)
+                curr_label = ""
+                if is_existing:
+                    curr_val = existing_row[col_name]
+                    curr_label = f" (Att: €{curr_val:,.0f})"
+                
+                new_expenses[col_name] = cols[i%3].number_input(f"{col_name}{curr_label}", value=0.0, step=10.0)
 
-            submitted = st.form_submit_button("Aggiungi al Database")
+            btn_label = "Aggiorna Mese" if is_existing else "Crea Mese"
+            submitted = st.form_submit_button(btn_label)
             
             if submitted:
-                # Controlla se esiste già
-                existing = df[(df['Year'] == year_input) & (df['Month'] == month_input)]
-                if not existing.empty:
-                    st.error(f"Esiste già un record per {month_input} {year_input}!")
+                if is_existing:
+                    # UPDATE LOGIC
+                    for col, val in new_incomes.items():
+                        if val != 0:
+                            df.loc[existing_mask, col] += val
+                    
+                    for col, val in new_expenses.items():
+                        if val != 0:
+                            df.loc[existing_mask, col] += val
+                    
+                    save_data(df)
+                    st.success(f"Dati aggiornati per {month_input} {year_input}!")
+                    st.rerun()
+
                 else:
+                    # CREATE LOGIC
                     new_row = {'Year': year_input, 'Month': month_input, 'MonthNum': month_num}
                     new_row.update(new_incomes)
                     new_row.update(new_expenses)
@@ -459,8 +562,73 @@ if not df.empty:
                     updated_df = pd.concat([new_df, base_df], ignore_index=True)
                     
                     save_data(updated_df)
-                    st.success("Mese aggiunto con successo!")
+                    st.success("Mese creato con successo!")
                     st.rerun()
+
+    # --- PAGINA AI ASSISTANT ---
+    elif page == "💬 Assistant AI":
+        st.header("💬 Financial Assistant")
+        st.caption("Chiedi al tuo assistente personale informazioni sul tuo budget.")
+        
+        # Check se il provider è configurato
+        if 'ai_provider' not in st.session_state or st.session_state['ai_provider'] is None:
+            st.warning("⚠️ Configura prima l'AI nella sidebar (scegli Provider e Modello e clicca Applica).")
+        else:
+            # 1. Inizializza cronologia chat
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
+
+            # 2. Visualizza messaggi precedenti
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            # 3. Input Utente
+            if prompt := st.chat_input("Chiedi qualcosa sui tuoi numeri..."):
+                # Aggiungi messaggio utente
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+
+                # 4. Generazione Risposta
+                with st.chat_message("assistant"):
+                    with st.spinner("Analizzando i dati..."):
+                        # Preparazione Contesto Dati
+                        def get_data_context(df_in):
+                            """Crea un contesto testuale dai dati recenti."""
+                            # Prendiamo gli ultimi 24 mesi per non intasare il contesto
+                            limit = 24 
+                            df_ctx = df_in.head(limit).copy()
+                            # Rimuoviamo colonne inutili per leggibilità
+                            cols_to_drop = ['DateObj', 'Notes', 'DateStr'] + [c for c in df_ctx.columns if c.startswith('Unnamed')]
+                            df_ctx = df_ctx.drop(columns=[c for c in cols_to_drop if c in df_ctx.columns], errors='ignore')
+                            
+                            csv_data = df_ctx.to_csv(index=False)
+                            return f"""
+                            SEI UN ESPERTO ANALISTA FINANZIARIO.
+                            Analizza i seguenti dati di budget personale (ultimi {limit} mesi).
+                            Rispondi in italiano. Sii conciso e diretto. Usa markdown per tabelle o grassetto.
+                            
+                            DATI CSV:
+                            {csv_data}
+                            """
+                        
+                        try:
+                            # Costruzione Prompt Completo
+                            system_context = get_data_context(df)
+                            final_prompt = f"{system_context}\n\nDOMANDA UTENTE: {prompt}"
+                            
+                            # Chiamata AI
+                            response_obj = st.session_state['ai_provider'].get_model().generate_content(final_prompt)
+                            response_text = response_obj.text
+                            
+                            st.markdown(response_text)
+                            st.session_state.messages.append({"role": "assistant", "content": response_text})
+                            
+                        except Exception as e:
+                            err_msg = f"Errore durante l'analisi: {e}"
+                            st.error(err_msg)
+                            st.session_state.messages.append({"role": "assistant", "content": err_msg})
 
 else:
     st.warning("Nessun dato caricato.")
