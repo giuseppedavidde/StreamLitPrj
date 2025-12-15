@@ -13,10 +13,8 @@ try:
 except Exception:
     _HAS_DOTENV = False
 
-API_KEY_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "api_key", "gemini_key.toml"
-)
-DOTENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+API_KEY_PATH = os.path.join(os.path.dirname(file), "..", "api_key", "gemini_key.toml")
+DOTENV_PATH = os.path.join(os.path.dirname(file), "..", ".env")
 
 
 def _write_env_var_manual(path: str, key: str, value: str):

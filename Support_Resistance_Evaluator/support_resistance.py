@@ -62,8 +62,8 @@ def cluster_levels(
 ):
     """Cluster nearby levels into averaged levels.
 
-    If `cluster_tol_abs` is provided, use absolute distance. Otherwise use relative
-    tolerance `tol_rel` (fractional).
+    If cluster_tol_abs is provided, use absolute distance. Otherwise use relative
+    tolerance tol_rel (fractional).
     """
     if not levels:
         return []
@@ -231,7 +231,7 @@ if sidebar_gemini_key:
         new_chat()
         st.sidebar.success("Cronologia cancellata.")
 
-    with st.sidebar.form("gemini_chat_form", clear_on_submit=False):
+with st.sidebar.form("gemini_chat_form", clear_on_submit=False):
         user_prompt_side = st.text_area(
             "Prompt per Gemini:",
             value=st.session_state.get("gemini_prefill_prompt", ""),
@@ -314,7 +314,7 @@ if st.button("Calcola e mostra supporti/resistenze"):
                     st.write("Pivot (raw) - resistenze:", res_pivots)
                     st.write("Pivot (raw) - supporti:", sup_pivots)
 
-                # 4) Clusterizza i livelli vicini
+# 4) Clusterizza i livelli vicini
                 clustered_res = cluster_levels(
                     res_pivots, cluster_tol_abs=tol_abs, tol_rel=tol_rel
                 )
