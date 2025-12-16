@@ -674,44 +674,52 @@ if not df.empty:
                     st.markdown(prompt)
 
                 # 4. Generazione Risposta
+                # 4. Generazione Risposta
                 with st.chat_message("assistant"):
-                    with st.spinner("Analizzando i dati..."):
-                        # Preparazione Contesto Dati
-                        def get_data_context(df_in):
-                            """Crea un contesto testuale dai dati recenti."""
-                            # Prendiamo gli ultimi 24 mesi per non intasare il contesto
-                            limit = 24 
-                            df_ctx = df_in.head(limit).copy()
-                            # Rimuoviamo colonne inutili per leggibilità
-                            cols_to_drop = ['DateObj', 'Notes', 'DateStr'] + [c for c in df_ctx.columns if c.startswith('Unnamed')]
-                            df_ctx = df_ctx.drop(columns=[c for c in cols_to_drop if c in df_ctx.columns], errors='ignore')
-                            
-                            csv_data = df_ctx.to_csv(index=False)
-                            return f"""
-                            SEI UN ESPERTO ANALISTA FINANZIARIO.
-                            Analizza i seguenti dati di budget personale (ultimi {limit} mesi).
-                            Rispondi in italiano. Sii conciso e diretto. Usa markdown per tabelle o grassetto.
-                            
-                            DATI CSV:
-                            {csv_data}
-                            """
+                    # Preparazione Contesto Dati
+                    def get_data_context(df_in):
+                        """Crea un contesto testuale dai dati recenti."""
+                        # Prendiamo gli ultimi 24 mesi per non intasare il contesto
+                        limit = 24 
+                        df_ctx = df_in.head(limit).copy()
+                        # Rimuoviamo colonne inutili per leggibilità
+                        cols_to_drop = ['DateObj', 'Notes', 'DateStr'] + [c for c in df_ctx.columns if c.startswith('Unnamed')]
+                        df_ctx = df_ctx.drop(columns=[c for c in cols_to_drop if c in df_ctx.columns], errors='ignore')
                         
-                        try:
-                            # Costruzione Prompt Completo
-                            system_context = get_data_context(df)
-                            final_prompt = f"{system_context}\n\nDOMANDA UTENTE: {prompt}"
-                            
-                            # Chiamata AI
-                            response_obj = st.session_state['ai_provider'].get_model().generate_content(final_prompt)
-                            response_text = response_obj.text
-                            
-                            st.markdown(response_text)
-                            st.session_state.messages.append({"role": "assistant", "content": response_text})
-                            
-                        except Exception as e:
-                            err_msg = f"Errore durante l'analisi: {e}"
-                            st.error(err_msg)
-                            st.session_state.messages.append({"role": "assistant", "content": err_msg})
+                        csv_data = df_ctx.to_csv(index=False)
+                        return f"""
+                        SEI UN ESPERTO ANALISTA FINANZIARIO.
+                        Analizza i seguenti dati di budget personale (ultimi {limit} mesi).
+                        Rispondi in italiano. Sii conciso e diretto. Usa markdown per tabelle o grassetto.
+                        
+                        ISTRUZIONE IMPORTANTE:
+                        Prima di dare la risposta finale, scrivi un blocco riga per riga indicando cosa stai analizzando, iniziando con 'Thinking:'.
+                        Esempio:
+                        Thinking: Analizzo le entrate degli ultimi 3 mesi...
+                        Thinking: Controllo le spese straordinarie...
+                        Thinking: Calcolo la media del risparmio...
+                        
+                        [RISPOSTA FINALE QUI]
+                        
+                        DATI CSV:
+                        {csv_data}
+                        """
+                    
+                    try:
+                        # Costruzione Prompt Completo
+                        system_context = get_data_context(df)
+                        final_prompt = f"{system_context}\n\nDOMANDA UTENTE: {prompt}"
+                        
+                        # Streaming
+                        stream_gen = st.session_state['ai_provider'].get_model().generate_stream(final_prompt)
+                        response_text = st.write_stream(stream_gen)
+                        
+                        st.session_state.messages.append({"role": "assistant", "content": response_text})
+                        
+                    except Exception as e:
+                        err_msg = f"Errore durante l'analisi: {e}"
+                        st.error(err_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": err_msg})
 
 else:
     st.warning("Nessun dato caricato.")

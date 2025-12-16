@@ -51,6 +51,26 @@ class OllamaWrapper:
             print(f"❌ Errore Ollama ({self.model_name}): {e}")
             raise e
 
+    def generate_stream(self, prompt: str):
+        """Esegue la chiamata a Ollama in streaming."""
+        try:
+            options = {'num_gpu': 999}
+            
+            stream = ollama.chat(
+                model=self.model_name,
+                messages=[{'role': 'user', 'content': prompt}],
+                stream=True,
+                options=options
+            )
+            
+            for chunk in stream:
+                content = chunk.get('message', {}).get('content', '')
+                if content:
+                    yield content
+                    
+        except Exception as e:
+            yield f"❌ Errore Ollama Stream: {e}"
+
 class GeminiWrapper:
     """Wrapper per Google Gemini con gestione retry e backoff."""
     def __init__(self, provider, json_mode: bool):
@@ -118,6 +138,15 @@ class GeminiWrapper:
                 break
 
         raise RuntimeError(f"Impossibile generare contenuto Gemini. Last Error: {last_error}")
+
+    def generate_stream(self, prompt):
+        """Genera contenuto in streaming."""
+        try:
+            response = self.real_model.generate_content(prompt, stream=True)
+            for chunk in response:
+                yield chunk.text
+        except Exception as e:
+            yield f"❌ Errore Gemini Stream: {e}"
 
 class AIProvider:
     """Factory per modelli AI (Cloud/Local) con Caching."""
