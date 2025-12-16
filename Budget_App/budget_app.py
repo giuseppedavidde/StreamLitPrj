@@ -1,4 +1,5 @@
 """Budget App"""
+import time
 import os
 import streamlit as st
 import pandas as pd
@@ -74,6 +75,12 @@ def calculate_metrics(df):
     return df, expense_cols, income_cols
 
 # --- Interfaccia Utente ---
+try:
+    from agents.cloud_ui import render_cloud_sync_ui
+except ImportError:
+    st.error("Modulo 'agents.cloud_ui' non trovato.")
+    def render_cloud_sync_ui(DATA_FILE, is_sidebar=True):
+        st.error("Funzione Cloud UI non disponibile")
 st.title("💰 Gestione Budget Personale")
 
 df = load_data()
@@ -152,83 +159,7 @@ if not df.empty:
                         st.error(f"Errore Init AI: {e}")
 
         # --- 1b. CLOUD DATA SYNC (Sidebar) ---
-        st.sidebar.divider()
-        with st.sidebar.expander("☁️ Cloud Data Sync", expanded=False):
-            # 1. Configurazione Token
-            env_gh_token = os.getenv("GITHUB_TOKEN")
-            github_token = st.text_input("GitHub Token (PAT)", value=env_gh_token if env_gh_token else "", type="password", help="Richiesto per GitHub")
-            
-            if CloudManager and github_token:
-                cm = CloudManager(github_token)
-                
-                # Bottone per caricare risorse (Cacheando in session state per evitare chiamate API continue)
-                if st.button("🔄 Connetti / Cerca Repo"):
-                    with st.spinner("Cerco repository..."):
-                        repos = cm.get_user_repos()
-                        st.session_state['gh_repos'] = repos
-                        if not repos:
-                            st.warning("Nessun repository trovato o token invalido.")
-                
-                # 2. Selezione Repo
-                repo_list = st.session_state.get('gh_repos', [])
-                selected_repo = None
-                
-                if repo_list:
-                    selected_repo = st.selectbox("Seleziona Repository", repo_list, index=0)
-                else:
-                    st.info("Clicca 'Connetti' per caricare i tuoi repository.")
-
-                # 3. Selezione File (Se repo selezionato)
-                selected_file_remote = None
-                if selected_repo:
-                     cache_key_files = f"gh_files_{selected_repo}"
-                     
-                     if cache_key_files not in st.session_state:
-                         with st.spinner(f"Cerco file CSV..."):
-                             files = cm.list_csv_files(selected_repo)
-                             st.session_state[cache_key_files] = files
-                     
-                     file_list = st.session_state[cache_key_files]
-                     
-                     if file_list:
-                         default_idx = 0
-                         if "Budget App/budget_database.csv" in file_list:
-                             default_idx = file_list.index("Budget App/budget_database.csv")
-                         
-                         selected_file_remote = st.selectbox("File CSV", file_list, index=default_idx)
-                     else:
-                         st.warning("Nessun file .csv trovato.")
-                         if st.button("Cerca di nuovo"): 
-                             del st.session_state[cache_key_files]
-                             st.rerun()
-
-                # 4. Azioni
-                if selected_repo and selected_file_remote:
-                    st.caption(f"Remote: `{selected_file_remote}`")
-                    
-                    c_down, c_up = st.columns(2)
-                    with c_down:
-                        if st.button("⬇️ Pull"):
-                             with st.spinner("Scaricamento..."):
-                                ok, msg = cm.github_download(selected_repo, selected_file_remote, DATA_FILE)
-                                if ok:
-                                    st.toast(f"Scaricato: {msg}", icon="✅")
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-                    with c_up:
-                        if st.button("⬆️ Push"):
-                             with st.spinner("Caricamento..."):
-                                ok, msg = cm.github_upload(selected_repo, selected_file_remote, DATA_FILE, commit_message="Update from Budget App Dashboard")
-                                if ok:
-                                    st.toast(f"Caricato: {msg}", icon="✅")
-                                else:
-                                    st.error(msg)
-            else:
-                 if not CloudManager:
-                     st.error("Libreria mancante.")
-                 elif not github_token:
-                     st.info("Inserisci Token GitHub.")
+        render_cloud_sync_ui(DATA_FILE, is_sidebar=True)
 
         # --- 2. FILTRI TEMPORALI (Sidebar) ---
         st.sidebar.divider()
@@ -722,4 +653,29 @@ if not df.empty:
                         st.session_state.messages.append({"role": "assistant", "content": err_msg})
 
 else:
-    st.warning("Nessun dato caricato.")
+    # --- SETUP MODE ---
+    st.info("👋 Benvenuto! Nessun database trovato. Iniziamo con il setup.")
+    st.divider()
+    
+    col_cloud, col_local = st.columns(2)
+    
+    with col_cloud:
+        st.subheader("☁️ Scarica da Cloud (GitHub)")
+        st.write("Collega il tuo account GitHub per scaricare il database.")
+        render_cloud_sync_ui(DATA_FILE, is_sidebar=False)
+        
+    with col_local:
+        st.subheader("📂 Carica CSV Locale")
+        st.write("Se hai un file `budget_database.csv` locale, caricalo qui.")
+        uploaded_file = st.file_uploader("Scegli un file CSV", type="csv")
+        
+        if uploaded_file is not None:
+            try:
+                # Leggi per validare (opzionale) o salva direttamente
+                with open(DATA_FILE, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                st.success(f"File salvato come {DATA_FILE}! Riavvio app...")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Errore salvataggio: {e}")
