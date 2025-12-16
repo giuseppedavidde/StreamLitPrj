@@ -1,0 +1,9 @@
+streamlit
+pandas
+plotly
+ollama
+google-generativeai
+beautifulsoup4
+requests
+python-dotenv
+PyGithub
