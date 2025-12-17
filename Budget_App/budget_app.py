@@ -301,6 +301,14 @@ if not df.empty:
             fillcolor='rgba(231, 76, 60, 0.1)'
         ))
         
+        # Calcolo Medie
+        avg_income = df_trend['Totale Entrate'].mean()
+        avg_expense = df_trend['Totale Uscite'].mean()
+        
+        # Aggiungi Linee Medie
+        fig_trend.add_hline(y=avg_income, line_dash="dot", line_color="#2ecc71", opacity=0.7, annotation_text=f"Media Entrate: €{avg_income:,.0f}", annotation_position="top left")
+        fig_trend.add_hline(y=avg_expense, line_dash="dot", line_color="#e74c3c", opacity=0.7, annotation_text=f"Media Uscite: €{avg_expense:,.0f}", annotation_position="bottom left")
+        
 
         
         # Evidenzia il mese selezionato - ora passando un datetime funziona
