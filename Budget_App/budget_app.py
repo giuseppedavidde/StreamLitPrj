@@ -610,8 +610,8 @@ if not df.empty:
                     # Preparazione Contesto Dati
                     def get_data_context(df_in):
                         """Crea un contesto testuale dai dati recenti."""
-                        # Prendiamo gli ultimi 24 mesi per non intasare il contesto
-                        limit = 24 
+                        # Prendiamo tutti i dati per non intasare il contesto
+                        limit = len(df_in) 
                         df_ctx = df_in.head(limit).copy()
                         # Rimuoviamo colonne inutili per leggibilità
                         cols_to_drop = ['DateObj', 'Notes', 'DateStr'] + [c for c in df_ctx.columns if c.startswith('Unnamed')]
