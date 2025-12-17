@@ -278,6 +278,12 @@ if not df.empty:
         
         st.subheader("🌊 Flusso di Cassa")
         
+        # Trova la data selezionata come oggetto datetime
+        selected_date_obj = pd.to_datetime(selected_row['DateStr'])
+
+        # Filter data to include only up to the selected date
+        df_trend = df_trend[df_trend['DateObj'] <= selected_date_obj]
+
         if selected_time_window != "All":
             df_trend = df_trend.tail(int(selected_time_window))
         
@@ -295,8 +301,7 @@ if not df.empty:
             fillcolor='rgba(231, 76, 60, 0.1)'
         ))
         
-        # Trova la data selezionata come oggetto datetime
-        selected_date_obj = pd.to_datetime(selected_row['DateStr'])
+
         
         # Evidenzia il mese selezionato - ora passando un datetime funziona
         fig_trend.add_vline(x=selected_date_obj.timestamp() * 1000, # Plotly a volte preferisce timestamp ms per assi date
