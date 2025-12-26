@@ -21,20 +21,10 @@ def calculate_gain_loss(df):
         invested = row["amount_fiat_collect"]
         median_price = row["median_price"]
         # Yahoo Finance symbol conversion (EUR pair)
-        yf_symbol = symbol
-        if symbol == "BTC":
-            yf_symbol = "BTC-EUR"
-        elif symbol == "ETH":
-            yf_symbol = "ETH-EUR"
-        elif symbol == "DOGE":
-            yf_symbol = "DOGE-EUR"
-        elif symbol == "BNB":
-            yf_symbol = "BNB-EUR"
-        elif symbol == "SOL":
-            yf_symbol = "SOL-EUR"
-        elif symbol == "XRP":
-            yf_symbol = "XRP-EUR"
-        # Add more mappings if needed
+        if "-" not in symbol:
+            yf_symbol = f"{symbol}-EUR"
+        else:
+            yf_symbol = symbol
         current_price = get_current_price(yf_symbol)
         if current_price is not None:
             current_value = shares * current_price
@@ -65,19 +55,11 @@ def portfolio_history(df):
         symbol = row["asset_collect"]
         shares = row["amount_asset_collect"]
         # Yahoo Finance symbol conversion (EUR pair)
-        yf_symbol = symbol
-        if symbol == "BTC":
-            yf_symbol = "BTC-EUR"
-        elif symbol == "ETH":
-            yf_symbol = "ETH-EUR"
-        elif symbol == "DOGE":
-            yf_symbol = "DOGE-EUR"
-        elif symbol == "BNB":
-            yf_symbol = "BNB-EUR"
-        elif symbol == "SOL":
-            yf_symbol = "SOL-EUR"
-        elif symbol == "XRP":
-            yf_symbol = "XRP-EUR"
+        # Generic fallback: append -EUR if not present
+        if "-" not in symbol:
+            yf_symbol = f"{symbol}-EUR"
+        else:
+            yf_symbol = symbol
         try:
             ticker = yf.Ticker(yf_symbol)
             hist = ticker.history(period="max")

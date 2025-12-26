@@ -1,3 +1,8 @@
 modules/__pycache__/*.pyc
 *.png
 .venv/*
+.env
+agents/__pycache__/*.pyc
+verif*
+check_*.py
+tests_*

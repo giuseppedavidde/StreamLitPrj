@@ -1,11 +1,16 @@
+"""
+Questo modulo contiene funzioni per la raccolta e il trattamento dei dati.
+"""
 import glob
 import os
-
 import numpy as np
 import pandas as pd
 
 
 def get_current_user() -> str:
+    """
+    Returns the current user's name.
+    """
     return os.getlogin()
 
 
@@ -216,6 +221,21 @@ def collect_bitpanda_data(filepath):
 
 
 def sort_data_by_asset(data):
+    """
+    Sorts the data by asset.
+
+    Parameters
+    ----------
+
+    data : dict
+        The data to sort.
+
+    Returns
+    -------
+
+    dict
+        The sorted data.
+    """
     sorted_data = {key: [] for key in data}
     sorted_indices = sorted(
         range(len(data["asset_collect"])), key=lambda k: data["asset_collect"][k]
@@ -224,3 +244,44 @@ def sort_data_by_asset(data):
         for key in data:
             sorted_data[key].append(data[key][i])
     return sorted_data
+
+
+def load_portfolio_snapshot(input_source):
+    """
+    Loads a pre-aggregated portfolio snapshot from a CSV file or buffer.
+    Expected columns: Symbol;Name;Shares;Share Cost (EUR);Invested (EUR)
+    Delimiter: ;
+    
+    Args:
+        input_source: File path (str) or file-like object (StringIO/BytesIO).
+    """
+    try:
+        df = pd.read_csv(input_source, sep=";")
+        
+        # Rename columns to match the application's internal naming convention
+        rename_map = {
+            "Symbol": "asset_collect",
+            "Shares": "amount_asset_collect",
+            "Invested (EUR)": "amount_fiat_collect",
+            "Share Cost (EUR)": "median_price",
+            "Last Update": "date_last_update",
+            "Last Update (Buy/Sell)": "date_last_update_buy",
+            "Last Update (Staking)": "date_last_update_staking"
+        }
+        df = df.rename(columns=rename_map)
+        
+        # Clean Asset names (e.g., 'BTC-EUR' -> 'BTC')
+        if "asset_collect" in df.columns:
+            df["asset_collect"] = df["asset_collect"].apply(lambda x: x.split("-")[0] if isinstance(x, str) and "-" in x else x)
+            
+        # Ensure numeric types
+        numeric_cols = ["amount_asset_collect", "amount_fiat_collect", "median_price"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                
+        return df
+    except Exception as e: # pylint: disable=broad-except
+        print(f"Error loading snapshot: {e}")
+        return pd.DataFrame()
+

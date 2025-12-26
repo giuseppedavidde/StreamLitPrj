@@ -2,3 +2,7 @@ streamlit
 pandas
 plotly
 yfinance
+yfinance
+requests
+PyGithub
+python-dotenv
