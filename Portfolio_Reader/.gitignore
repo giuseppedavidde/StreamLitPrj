@@ -2,4 +2,6 @@ modules/__pycache__/*.pyc
 FIR_Filter/*
 *.png
 .venv/*
+.env
+agents/__pycache__/*.pyc
 
