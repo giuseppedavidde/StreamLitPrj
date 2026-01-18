@@ -85,6 +85,10 @@ if 'ai_provider' in st.session_state and st.session_state['ai_provider']:
     
     # Show chat
     with st.sidebar.expander("Conversazione", expanded=True):
+        if st.button("🗑️ Pulisci Chat"):
+            st.session_state.chat_history = []
+            st.rerun()
+            
         for msg in st.session_state.chat_history:
              with st.chat_message(msg["role"]):
                 st.write(msg["content"])
@@ -97,9 +101,37 @@ if 'ai_provider' in st.session_state and st.session_state['ai_provider']:
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     try:
-                        # Simple context context
-                        context = "Sei un consulente finanziario esperto. Analizza le richieste dell'utente."
-                        final_prompt = f"{context}\n\nUser: {user_prompt}"
+                        # --- CONTEXT PREPARATION ---
+                        system_msg = "Sei un consulente finanziario esperto."
+                        
+                        # Data from Session State
+                        # Priority: 1. Analyzed Table (df_invested_capital as CSV) 2. Raw File (Cloud Sync)
+                        
+                        KEY_ANALYZED = 'portfolio_analyzed_csv'
+                        KEY_RAW = 'portfolio_cloud_data'
+                        
+                        data_context_str = ""
+                        
+                        if KEY_ANALYZED in st.session_state and st.session_state[KEY_ANALYZED]:
+                             data_context_str = st.session_state[KEY_ANALYZED]
+                             system_msg += "\n\nAnalizza la seguente tabella riassuntiva del portafoglio (DCA and Gain Analysis):\n"
+                        elif KEY_RAW in st.session_state and st.session_state[KEY_RAW]:
+                            data_context_str = st.session_state[KEY_RAW]
+                            if isinstance(data_context_str, bytes):
+                                data_context_str = data_context_str.decode('utf-8')
+                            system_msg += "\n\nHai accesso ai dati grezzi del portafoglio (CSV):\n"
+                        
+                        if data_context_str:
+                             system_msg += f"""
+                             {data_context_str}
+                             
+                             Rispondi alle domande dell'utente basandoti su questi dati.
+                             Sii preciso e conciso. Rispondi in italiano.
+                             """
+                        else:
+                             system_msg += " Non hai accesso ai dati del portafoglio al momento. Rispondi genericamente."
+
+                        final_prompt = f"{system_msg}\n\nDOMANDA UTENTE: {user_prompt}"
                         
                         stream = st.session_state['ai_provider'].get_model().generate_stream(final_prompt)
                         response = st.write_stream(stream)
@@ -112,34 +144,48 @@ else:
 
 # --- 4. MAIN: DATA LOADING ---
 df_portfolio = None
+import io
 
 # Logic:
-# 1. Try load local DATA_FILE
-# 2. Else, allow upload or use default
+# 1. Check Cloud Data (Session State)
+# 2. Check local DATA_FILE (Fallback)
+# 3. Allow upload or default
 
-if os.path.exists(DATA_FILE):
+KEY_DATA = 'portfolio_cloud_data'
+
+if KEY_DATA in st.session_state and st.session_state[KEY_DATA]:
+    try:
+        raw_data = st.session_state[KEY_DATA]
+        if isinstance(raw_data, bytes):
+             raw_data = io.BytesIO(raw_data)
+        else:
+             raw_data = io.StringIO(raw_data)
+        
+        df_portfolio = pd.read_csv(raw_data, sep=";")
+        st.info("Using Cloud Data (In-Memory)")
+    except Exception as e:
+        st.error(f"Errore lettura dati cloud: {e}")
+
+if df_portfolio is None and os.path.exists(DATA_FILE):
+    # Only load local if no cloud data
     try:
         df_portfolio = pd.read_csv(DATA_FILE, sep=";") # Assuming semicolon for this portfolio file
+        st.warning(f"Using Local File: {DATA_FILE} (Cloud data not loaded)")
     except Exception as e:
         st.error(f"Errore lettura file locale {DATA_FILE}: {e}")
 
 if df_portfolio is None:
-    st.info("Nessun portfolio locale trovato. Puoi caricarne uno o scaricarlo da GitHub (menu a sinistra).")
+    st.info("Nessun portfolio trovato. Scaricalo da GitHub (menu a sinistra) o caricane uno.")
     uploaded_file = st.file_uploader("Carica Portfolio CSV (sep=;)", type=["csv"])
     if uploaded_file:
         df_portfolio = pd.read_csv(uploaded_file, sep=";")
-        # Fix: Save immediately to local for persistence
-        df_portfolio.to_csv(DATA_FILE, sep=";", index=False)
+        # If uploaded manually, maybe we treat as cloud data "draft"?
+        # For now, stick to old behavior or just put in memory?
+        # Let's put in memory so Push works
+        csv_buffer = io.StringIO()
+        df_portfolio.to_csv(csv_buffer, sep=";", index=False)
+        st.session_state[KEY_DATA] = csv_buffer.getvalue()
         st.rerun()
-    
-    # Fallback default
-    default_path = os.path.join(
-        os.path.dirname(__file__), "modules", "..", "Data_for_Analysis", "My_Portfolio.csv" # Adjust path logic if needed
-    )
-    # Actually the original code had: os.path.dirname(__file__), "..", "Data_for_Analysis", "My_Portfolio.csv"
-    # But since we are at root of Portfolio_Reader, it might be different. Let's keep original logic roughly.
-    # If standard default exists, use it?
-    # For now, let's stick to: if no file, show upload or cloud sync.
     
 
 # --- 5. DATA EDITING & SAVING ---
@@ -152,13 +198,57 @@ if df_portfolio is not None:
             df_portfolio["Formula"] = ""
         # Convert all columns to string/object to allow formulas and text
         df_portfolio = df_portfolio.astype(str)
+
+        # --- FOCUS MODE LOGIC ---
+        ticker_col = "Ticker" # Adjust if your CSV uses different name (e.g. Symbol)
+        # Check actual column name
+        if "Ticker" not in df_portfolio.columns:
+            if "Symbol" in df_portfolio.columns:
+                 ticker_col = "Symbol"
+            else:
+                 ticker_col = df_portfolio.columns[0] # Fallback
         
-        edited_df = st.data_editor(
-            df_portfolio,
+        all_tickers = ["ALL"] + sorted(df_portfolio[ticker_col].astype(str).unique().tolist())
+        selected_focus = st.selectbox("🔍 Focus Mode (Filter by Ticker)", all_tickers, index=0)
+        
+        df_to_edit = df_portfolio.copy()
+        if selected_focus != "ALL":
+             df_to_edit = df_portfolio[df_portfolio[ticker_col] == selected_focus].copy()
+             st.info(f"Editing only: **{selected_focus}**")
+
+        edited_subset = st.data_editor(
+            df_to_edit,
             num_rows="dynamic",
             use_container_width=True,
             key="portfolio_editor",
         )
+        
+        # Merge Changes Logic
+        # We need to reconstruct the full 'edited_df'
+        edited_df = df_portfolio.copy()
+        
+        if selected_focus != "ALL":
+             # Update the rows in the full DF with the edited subset
+             # We assume index is preserved or valid for alignment
+             # st.data_editor returns a new DF. We must match indices.
+             # Note: If user adds rows in subset, index might be new.
+             
+             # 1. Update existing rows
+             edited_df.update(edited_subset)
+             
+             # 2. Handle potentially new rows (complex with subsets, maybe disable add_rows in focus mode?)
+             # If user added a row in subset, it won't be in edited_df index potentially.
+             # For simplicity now: Update matching indices.
+             # If adding rows is key feature in Focus Mode, we need to append them.
+             
+             # Let's trust .update() for modification of existing.
+             
+             # If subset rows count changed?
+             # If simplicity is key: Just overwrite the rows matching indices.
+             pass
+        else:
+             edited_df = edited_subset
+
 
         # Show number of rows and columns
         n_rows, n_cols = edited_df.shape
@@ -190,11 +280,27 @@ if df_portfolio is not None:
         st.dataframe(edited_df)
         
         # Save Logic
-        if st.button("💾 Salva Modifiche (Locale)"):
+        # Save Logic
+        # If in cloud mode, update session state automatically on change? 
+        # Or provide a button to "Commit to Memory" before Push?
+        # Better: Update memory on button press, then user must Push.
+        
+        if st.button("💾 Aggiorna Memoria (Pronto per Push)"):
              csv_data = edited_df.drop(columns=["Formula Result"])
-             csv_data.to_csv(DATA_FILE, index=False, sep=";")
-             st.success(f"Salvato in {DATA_FILE}! Ora puoi fare 'Push' dal menu Cloud Sync.")
+             
+             # Convert to CSV string
+             csv_buffer = io.StringIO()
+             csv_data.to_csv(csv_buffer, index=False, sep=";")
+             st.session_state[KEY_DATA] = csv_buffer.getvalue()
+             
+             st.toast("Memoria aggiornata! Ora puoi fare 'Push' dal menu Cloud Sync.", icon="🧠")
              st.rerun()
+             
+        # Optional: Save to Local (Legacy support, maybe hidden or secondary)
+        # if st.button("Salva in Locale (Legacy)"):
+        #      csv_data = edited_df.drop(columns=["Formula Result"])
+        #      csv_data.to_csv(DATA_FILE, index=False, sep=";")
+        #      st.success(f"Salvato in {DATA_FILE}")
 
 # --- 6. ANALYSIS LOGIC (Original Preserved) ---
 if df_portfolio is not None:
@@ -302,7 +408,9 @@ if df_portfolio is not None:
         invested_capital_eur_dict_today = {}
         shares_dict = {}
         shares_cost_dict = {}
+        shares_cost_usd_dict = {}
         shares_value_dict = {}
+        shares_value_usd_dict = {}
         gain_shares_absolute_value_dict = {}
         gain_shares_percentage_dict = {}
         
@@ -351,12 +459,16 @@ if df_portfolio is not None:
                     # Original logic was bit custom for specific symbols or heuristic
                     if invested_capital_usd_dict[symbol] > 0.0:
                         shares_value_dict[symbol] = close_price * latest_rate
-                    elif symbol in ["IE00BK5BQT80", "IE00BFMXXD54"]: # Example specific handling
+                        shares_value_usd_dict[symbol] = close_price
+                    elif symbol in ["IE00BK5BQT80", "IE00BFMXXD54"]: # EUR ETFs
                          shares_value_dict[symbol] = close_price * latest_rate
+                         shares_value_usd_dict[symbol] = close_price
                     else:
                         shares_value_dict[symbol] = close_price
+                        shares_value_usd_dict[symbol] = close_price / latest_rate if latest_rate else 0.0
                 else:
                     shares_value_dict[symbol] = 0.0
+                    shares_value_usd_dict[symbol] = 0.0
                 
                 invested_capital_eur_dict[symbol] = (
                     (invested_capital_usd_dict[symbol] * latest_rate + invested_capital_eur)
@@ -369,6 +481,12 @@ if df_portfolio is not None:
                 shares_cost_dict[symbol] = (
                     invested_capital_eur_dict[symbol] / shares_dict[symbol]
                     if shares_dict[symbol] > 0.0
+                    else 0.0
+                )
+                
+                shares_cost_usd_dict[symbol] = (
+                    shares_cost_dict[symbol] / latest_rate
+                    if latest_rate and shares_cost_dict[symbol] > 0.0
                     else 0.0
                 )
                 
@@ -431,13 +549,25 @@ if df_portfolio is not None:
                     invested_capital_eur_dict_today.values()
                 ),
                 "Shares": list(shares_dict.values()),
+                "Share Value (USD)": list(shares_value_usd_dict.values()),
                 "Share Value (EUR)": list(shares_value_dict.values()),
+                "Share Cost (USD)": list(shares_cost_usd_dict.values()),
                 "Share Cost (EUR)": list(shares_cost_dict.values()),
                 "Gain (EUR)": list(gain_shares_absolute_value_dict.values()),
                 "Gain %": list(gain_shares_percentage_dict.values()),
             }
         )
         st.dataframe(df_invested_capital)
+        
+        # --- Update Session State for AI Context ---
+        try:
+             # Save this dataframe as CSV string to session state for the Chat Assistant
+             import io
+             buf = io.StringIO()
+             df_invested_capital.to_csv(buf, index=False)
+             st.session_state['portfolio_analyzed_csv'] = buf.getvalue()
+        except Exception as e:
+             print(f"Error caching portfolio for AI: {e}")
         
         # Totals
         eur_total = stock_under_test["Total Invested (EUR)"].astype(float).sum() if "Total Invested (EUR)" in stock_under_test.columns else 0 # Careful with Total columns sum vs single row

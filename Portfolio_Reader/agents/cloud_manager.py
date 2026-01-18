@@ -15,62 +15,71 @@ class CloudManager:
         """Verifica se la connessione al Cloud (GitHub) è stabilita."""
         return self.gh is not None
 
-    def github_download(self, repo_name, file_path_remote, file_path_local):
-        """Scarica un file da GitHub e sovrascrive quello locale."""
-        if not self.gh: # pylint: disable=using-constant-test
+    def download_file_content(self, repo_name, file_path_remote):
+        """Scarica il contenuto di un file da GitHub (ritorna stringa/bytes)."""
+        if not self.gh:
             raise Exception("GitHub Token non fornito.")
         
         try:
             repo = self.gh.get_repo(repo_name)
             contents = repo.get_contents(file_path_remote)
-            
-            # Scrivi contenuto locale
-            # contents.decoded_content è in bytes
-            with open(file_path_local, 'wb') as f:
-                f.write(contents.decoded_content)
-                
-            return True, f"File scaricato da {repo_name}/{file_path_remote}"
-        
+            # Ritorna il contenuto decodificato (bytes)
+            return True, contents.decoded_content
         except GithubException as e:
             return False, f"Errore GitHub: {e.status} - {e.data.get('message', '')}"
-        except Exception as e: # pylint: disable=broad-exception-caught
+        except Exception as e:
             return False, f"Errore generico: {str(e)}"
 
-    def github_upload(self, repo_name, file_path_remote, file_path_local, commit_message="Update data from Budget App"):
-        """Carica un file locale su GitHub (aggiorna o crea)."""
-        if not self.gh: # pylint: disable=using-constant-test
+    def github_download(self, repo_name, file_path_remote, file_path_local):
+        """Scarica un file da GitHub e sovrascrive quello locale."""
+        success, content = self.download_file_content(repo_name, file_path_remote)
+        if not success:
+            return False, content # error message
+            
+        try:
+            with open(file_path_local, 'wb') as f:
+                f.write(content)
+            return True, f"File scaricato da {repo_name}/{file_path_remote}"
+        except Exception as e:
+            return False, f"Errore scrittura locale: {str(e)}"
+
+    def upload_file_content(self, repo_name, file_path_remote, content, commit_message="Update data from Portfolio Reader"):
+        """Carica contenuto (str/bytes) su GitHub."""
+        if not self.gh:
             raise Exception("GitHub Token non fornito.")
-        
+            
         try:
             repo = self.gh.get_repo(repo_name)
             
-            # Leggi contenuto locale
-            if not os.path.exists(file_path_local):
-                return False, "File locale non trovato."
-                
-            with open(file_path_local, 'r', encoding='utf-8') as f: # Assumi CSV utf-8
-                content = f.read()
-
-            # Cerca se il file esiste già (per prendere l'SHA necessario per l'update)
+            # Se content è stringa, assicuriamoci che sia gestita correttamente
+            # PyGithub accetta str o bytes
+            
             try:
                 contents = repo.get_contents(file_path_remote)
-                # Update
                 repo.update_file(contents.path, commit_message, content, contents.sha)
                 return True, "File aggiornato con successo."
             except GithubException as e:
                 if e.status == 404:
-                    # Create
                     repo.create_file(file_path_remote, commit_message, content)
                     return True, "File creato con successo."
                 else:
                     raise e
-                    
         except GithubException as e:
             return False, f"Errore GitHub: {e.status} - {e.data.get('message', '')}"
         except Exception as e:
             return False, f"Errore generico: {str(e)}"
+
+    def github_upload(self, repo_name, file_path_remote, file_path_local, commit_message="Update data from Budget App"):
+        """Carica un file locale su GitHub (aggiorna o crea)."""
+        if not os.path.exists(file_path_local):
+            return False, "File locale non trovato."
+            
+        try:
+            with open(file_path_local, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return self.upload_file_content(repo_name, file_path_remote, content, commit_message)
         except Exception as e:
-            return False, f"Errore generico: {str(e)}"
+            return False, f"Errore lettura locale: {str(e)}"
 
     def get_user_repos(self):
         """Restituisce una lista di nomi dei repository dell'utente autenticato."""

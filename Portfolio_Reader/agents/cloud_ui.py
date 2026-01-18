@@ -64,25 +64,43 @@ def render_cloud_sync_ui(DATA_FILE, is_sidebar=True):
             if selected_repo and selected_file_remote:
                 st.caption(f"Remote: `{selected_file_remote}`")
                 
+                # Setup Keys per Session State
+                KEY_DATA = 'portfolio_cloud_data'
+                KEY_META = 'portfolio_cloud_source'
+
                 c_down, c_up = st.columns(2)
                 with c_down:
                     if st.button("⬇️ Pull", key=f"btn_pull_{'sb' if is_sidebar else 'main'}"):
-                            with st.spinner("Scaricamento..."):
-                            # Se non siamo in sidebar, DATA_FILE potrebbe non esistere, ma scaricandolo lo creiamo
-                                ok, msg = cm.github_download(selected_repo, selected_file_remote, DATA_FILE)
+                            with st.spinner("Scaricamento (In Memory)..."):
+                                ok, content = cm.download_file_content(selected_repo, selected_file_remote)
                                 if ok:
-                                    st.toast(f"Scaricato: {msg}", icon="✅")
+                                    st.session_state[KEY_DATA] = content
+                                    st.session_state[KEY_META] = {
+                                        "repo": selected_repo,
+                                        "file": selected_file_remote
+                                    }
+                                    st.toast(f"Scaricato in memoria!", icon="✅")
                                     st.rerun()
                                 else:
-                                    st.error(msg)
+                                    st.error(str(content))
                 with c_up:
                     if st.button("⬆️ Push", key=f"btn_push_{'sb' if is_sidebar else 'main'}"):
-                            with st.spinner("Caricamento..."):
-                                ok, msg = cm.github_upload(selected_repo, selected_file_remote, DATA_FILE, commit_message="Update from Budget App Dashboard")
-                                if ok:
-                                    st.toast(f"Caricato: {msg}", icon="✅")
-                                else:
-                                    st.error(msg)
+                            # Prende dal session state
+                            if KEY_DATA in st.session_state and st.session_state[KEY_DATA]:
+                                with st.spinner("Caricamento da memoria..."):
+                                    # Ensure content is correct type
+                                    content_to_upload = st.session_state[KEY_DATA]
+                                    if isinstance(content_to_upload, bytes):
+                                        content_to_upload = content_to_upload.decode('utf-8')
+                                        
+                                    ok, msg = cm.upload_file_content(selected_repo, selected_file_remote, content_to_upload, commit_message="Update from Portfolio Reader")
+                                    if ok:
+                                        st.toast(f"Caricato: {msg}", icon="✅")
+                                    else:
+                                        st.error(msg)
+                            else:
+                                st.warning("Nessun dato in memoria da caricare. Fai prima Pull o modifica i dati.")
+
         else:
                 if not CloudManager:
                     st.error("Libreria mancante.")
