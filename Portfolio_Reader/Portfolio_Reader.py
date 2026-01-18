@@ -566,25 +566,24 @@ if df_portfolio is not None:
                 weight_by_symbol_today[symbol]["weight"] = 0.0
 
         # DataFrame for invested capital
+        # Ensure lists are aligned
+        symbols_list = list(invested_capital_eur_dict.keys())
+        
         df_invested_capital = pd.DataFrame(
             {
-                "Symbol": list(invested_capital_eur_dict.keys()),
-                "BEGINNING: Invested Capital (EUR)": list(
-                    invested_capital_eur_dict.values()
-                ),
-                "TODAY: Invested Capital (EUR)": list(
-                    invested_capital_eur_dict_today.values()
-                ),
-                "Shares": list(shares_dict.values()),
-                "Share Value (USD)": list(shares_value_usd_dict.values()),
-                "Share Value (EUR)": list(shares_value_dict.values()),
-                "Share Cost (USD)": list(shares_cost_usd_dict.values()),
-                "Share Cost (EUR)": list(shares_cost_dict.values()),
-                "Gain (EUR)": list(gain_shares_absolute_value_dict.values()),
-                "Gain %": list(gain_shares_percentage_dict.values()),
+                "Symbol": symbols_list,
+                "BEGINNING: Invested Capital (EUR)": [invested_capital_eur_dict.get(s, 0.0) for s in symbols_list],
+                "TODAY: Invested Capital (EUR)": [invested_capital_eur_dict_today.get(s, 0.0) for s in symbols_list],
+                "Shares": [shares_dict.get(s, 0.0) for s in symbols_list],
+                "Share Value (USD)": [shares_value_usd_dict.get(s, 0.0) for s in symbols_list],
+                "Share Value (EUR)": [shares_value_dict.get(s, 0.0) for s in symbols_list],
+                "Share Cost (USD)": [shares_cost_usd_dict.get(s, 0.0) for s in symbols_list],
+                "Share Cost (EUR)": [shares_cost_dict.get(s, 0.0) for s in symbols_list],
+                "Gain (EUR)": [gain_shares_absolute_value_dict.get(s, 0.0) for s in symbols_list],
+                "Gain %": [gain_shares_percentage_dict.get(s, 0.0) for s in symbols_list],
             }
         )
-        st.dataframe(df_invested_capital)
+        st.dataframe(df_invested_capital, use_container_width=True)
         
         # --- Update Session State for AI Context ---
         try:
