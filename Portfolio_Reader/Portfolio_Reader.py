@@ -188,119 +188,146 @@ if df_portfolio is None:
         st.rerun()
     
 
-# --- 5. DATA EDITING & SAVING ---
+# --- 5. DATA EDITING & MANAGEMENT ---
 if df_portfolio is not None:
-    with st.expander("Edit Portfolio Data", expanded=False):
-        st.subheader("Edit Data")
-        
-        # Add a Formula column if not present
-        if "Formula" not in df_portfolio.columns:
-            df_portfolio["Formula"] = ""
-        # Convert all columns to string/object to allow formulas and text
-        df_portfolio = df_portfolio.astype(str)
+    st.sidebar.divider()
+    st.sidebar.header("🛠️ Gestione Portfolio")
+    
+    with st.sidebar.expander("➕ Aggiungi Transazione", expanded=True):
+        with st.form("add_transaction_form"):
+            # Get Tickers for suggestions
+            ticker_col_name = "Symbol" if "Symbol" in df_portfolio.columns else df_portfolio.columns[0]
+            existing_tickers = sorted(df_portfolio[ticker_col_name].astype(str).unique().tolist())
+            
+            # Selectbox for Ticker
+            selected_ticker_opt = st.selectbox("Seleziona Ticker", ["-- Seleziona --"] + existing_tickers + ["➕ NUOVO TICKER"])
+            
+            new_ticker = ""
+            if selected_ticker_opt == "➕ NUOVO TICKER":
+                 new_ticker = st.text_input("Inserisci Nuovo Ticker (es. VWCE.DE)").strip().upper()
+            elif selected_ticker_opt != "-- Seleziona --":
+                 new_ticker = selected_ticker_opt
+            
+            broker = st.selectbox("Broker", ["Trade Republic", "Flatex", "Other"], index=0)
+            txn_type = st.selectbox("Tipo", ["Buy", "Sell"], index=0)
+            
+            shares = st.number_input("Quote (Shares)", min_value=0.0, value=0.0, step=0.000001, format="%.6f")
+            price_per_share = st.number_input("Prezzo per Quota (EUR)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
+            txn_date = st.date_input("Data Transazione", value=pd.Timestamp.today())
+            
+            submitted = st.form_submit_button("Aggiungi / Aggiorna")
+            
+            if submitted:
+                if not new_ticker:
+                    st.error("Seleziona o inserisci un Ticker valido.")
+                elif shares <= 0:
+                     st.error("Inserisci una quantità di quote valida (> 0).")
+                elif price_per_share < 0:
+                     st.error("Il prezzo non può essere negativo.")
+                else:
+                    # --- UPDATE LOGIC ---
+                    try:
+                        df = df_portfolio.copy()
+                        
+                        # 1. Check if Ticker exists
+                        if new_ticker in df[ticker_col_name].values:
+                            idx = df.index[df[ticker_col_name] == new_ticker].tolist()[0]
+                        else:
+                            # Append new row
+                            new_row = {col: np.nan for col in df.columns}
+                            new_row[ticker_col_name] = new_ticker
+                            new_row["Category"] = "Stock" # Default
+                            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                            idx = df.index[-1]
+                            st.info(f"Nuovo Ticker {new_ticker} creato.")
 
-        # --- FOCUS MODE LOGIC ---
-        ticker_col = "Ticker" # Adjust if your CSV uses different name (e.g. Symbol)
-        # Check actual column name
-        if "Ticker" not in df_portfolio.columns:
-            if "Symbol" in df_portfolio.columns:
-                 ticker_col = "Symbol"
-            else:
-                 ticker_col = df_portfolio.columns[0] # Fallback
-        
-        all_tickers = ["ALL"] + sorted(df_portfolio[ticker_col].astype(str).unique().tolist())
-        selected_focus = st.selectbox("🔍 Focus Mode (Filter by Ticker)", all_tickers, index=0)
-        
-        df_to_edit = df_portfolio.copy()
-        if selected_focus != "ALL":
-             df_to_edit = df_portfolio[df_portfolio[ticker_col] == selected_focus].copy()
-             st.info(f"Editing only: **{selected_focus}**")
+                        # 2. Broker specific updates
+                        def get_val(r, c):
+                            try:
+                                return float(r[c]) if pd.notna(r[c]) else 0.0
+                            except:
+                                return 0.0
 
-        edited_subset = st.data_editor(
-            df_to_edit,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="portfolio_editor",
-        )
-        
-        # Merge Changes Logic
-        # We need to reconstruct the full 'edited_df'
-        edited_df = df_portfolio.copy()
-        
-        if selected_focus != "ALL":
-             # Update the rows in the full DF with the edited subset
-             # We assume index is preserved or valid for alignment
-             # st.data_editor returns a new DF. We must match indices.
-             # Note: If user adds rows in subset, index might be new.
-             
-             # 1. Update existing rows
-             edited_df.update(edited_subset)
-             
-             # 2. Handle potentially new rows (complex with subsets, maybe disable add_rows in focus mode?)
-             # If user added a row in subset, it won't be in edited_df index potentially.
-             # For simplicity now: Update matching indices.
-             # If adding rows is key feature in Focus Mode, we need to append them.
-             
-             # Let's trust .update() for modification of existing.
-             
-             # If subset rows count changed?
-             # If simplicity is key: Just overwrite the rows matching indices.
-             pass
-        else:
-             edited_df = edited_subset
+                        if broker == "Trade Republic":
+                            col_invest = "TR Investment"
+                            col_shares = "TR Shares " 
+                            col_avg = "TR  Average Cost"
+                        elif broker == "Flatex":
+                            col_invest = "Flatex Investment "
+                            col_shares = "Flatex Shares"
+                            col_avg = "Flatex Average Cost"
+                        else:
+                            col_invest = f"{broker} Investment"
+                            col_shares = f"{broker} Shares"
+                            col_avg = f"{broker} Average Cost"
+                            for c in [col_invest, col_shares, col_avg]:
+                                if c not in df.columns:
+                                    df[c] = np.nan
 
+                        def find_col(exact):
+                            if exact in df.columns: return exact
+                            for c in df.columns:
+                                if c.strip() == exact.strip(): return c
+                            return exact
 
-        # Show number of rows and columns
-        n_rows, n_cols = edited_df.shape
-        st.caption(f"Table shape: {n_rows} rows × {n_cols} columns")
+                        col_invest = find_col(col_invest)
+                        col_shares = find_col(col_shares)
+                        col_avg = find_col(col_avg)
 
-        # Evaluate formulas logic (Keep original)
-        import re
-        def eval_formula(row, df):
-            formula = row.get("Formula", "")
-            if isinstance(formula, str) and formula.startswith("="):
-                expr = formula[1:]
-                for col in df.columns:
-                    if col != "Formula":
-                        try:
-                            val = float(row.get(col, 0))
-                        except Exception:
-                            val = f'"{row.get(col, "")}"'
-                        expr = re.sub(rf"\\b{col}\\b", str(val), expr)
-                try:
-                    allowed_names = {k: v for k, v in vars(np).items() if not k.startswith("_")}
-                    allowed_names.update({"SUM": np.sum, "MIN": np.min, "MAX": np.max})
-                    result = eval(expr, {"__builtins__": None}, allowed_names)
-                    return result
-                except Exception:
-                    return "ERR"
-            return ""
+                        cur_shares = get_val(df.loc[idx], col_shares)
+                        cur_invest = get_val(df.loc[idx], col_invest)
+                        
+                        txn_invest = shares * price_per_share
+                        
+                        if txn_type == "Buy":
+                            new_shares_broker = cur_shares + shares
+                            new_invest_broker = cur_invest + txn_invest
+                        else: # Sell
+                            new_shares_broker = max(0, cur_shares - shares)
+                            if cur_shares > 0:
+                                ratio = new_shares_broker / cur_shares
+                                new_invest_broker = cur_invest * ratio
+                            else:
+                                new_invest_broker = 0
 
-        edited_df["Formula Result"] = edited_df.apply(lambda row: eval_formula(row, edited_df), axis=1)
-        st.dataframe(edited_df)
-        
-        # Save Logic
-        # Save Logic
-        # If in cloud mode, update session state automatically on change? 
-        # Or provide a button to "Commit to Memory" before Push?
-        # Better: Update memory on button press, then user must Push.
-        
-        if st.button("💾 Aggiorna Memoria (Pronto per Push)"):
-             csv_data = edited_df.drop(columns=["Formula Result"])
-             
-             # Convert to CSV string
-             csv_buffer = io.StringIO()
-             csv_data.to_csv(csv_buffer, index=False, sep=";")
-             st.session_state[KEY_DATA] = csv_buffer.getvalue()
-             
-             st.toast("Memoria aggiornata! Ora puoi fare 'Push' dal menu Cloud Sync.", icon="🧠")
-             st.rerun()
-             
-        # Optional: Save to Local (Legacy support, maybe hidden or secondary)
-        # if st.button("Salva in Locale (Legacy)"):
-        #      csv_data = edited_df.drop(columns=["Formula Result"])
-        #      csv_data.to_csv(DATA_FILE, index=False, sep=";")
-        #      st.success(f"Salvato in {DATA_FILE}")
+                        df.at[idx, col_shares] = new_shares_broker
+                        df.at[idx, col_invest] = new_invest_broker
+                        
+                        if new_shares_broker > 0:
+                            df.at[idx, col_avg] = new_invest_broker / new_shares_broker
+                        else:
+                            df.at[idx, col_avg] = 0
+
+                        # 3. Aggregation
+                        tr_shares_c = find_col("TR Shares ")
+                        tr_inv_c = find_col("TR Investment")
+                        fla_shares_c = find_col("Flatex Shares")
+                        fla_inv_c = find_col("Flatex Investment ")
+                        
+                        total_shares = get_val(df.loc[idx], tr_shares_c) + get_val(df.loc[idx], fla_shares_c)
+                        total_invest_eur = get_val(df.loc[idx], tr_inv_c) + get_val(df.loc[idx], fla_inv_c)
+                        
+                        df.at[idx, "Shares"] = total_shares
+                        df.at[idx, "Invested (EUR)"] = total_invest_eur
+                        
+                        if total_shares > 0:
+                            df.at[idx, "Share cost (EUR)"] = total_invest_eur / total_shares
+                        else:
+                            df.at[idx, "Share cost (EUR)"] = 0
+                            
+                        df.at[idx, "Last Purchase (YY-MM-DD)"] = txn_date.strftime("%Y-%m-%d")
+
+                        # Save
+                        df_portfolio = df
+                        csv_buffer = io.StringIO()
+                        df_portfolio.to_csv(csv_buffer, sep=";", index=False)
+                        st.session_state[KEY_DATA] = csv_buffer.getvalue()
+                        
+                        st.success(f"Aggiornato {new_ticker}!")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Errore aggiornamento: {e}")
 
 # --- 6. ANALYSIS LOGIC (Original Preserved) ---
 if df_portfolio is not None:
@@ -332,7 +359,7 @@ if df_portfolio is not None:
                 pass
         return df_new
 
-    df_analysis = safe_convert(edited_df) if 'edited_df' in locals() else df_portfolio 
+    df_analysis = df_portfolio 
     # Fallback to df_portfolio (loaded from disk/upload) if edited_df not yet defined (e.g. not expanded)
     # Actually edited_df is defined inside expander. If expander closed, it might NOT be in locals if st.data_editor not run?
     # st.data_editor runs even if not visible? No, if inside expander it runs.
