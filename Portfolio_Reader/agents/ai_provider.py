@@ -24,9 +24,21 @@ class OllamaWrapper:
         self.model_name = model_name
         self.json_mode = json_mode
 
-    def generate_content(self, prompt: str):
+    def _extract_text_from_multimodal(self, prompt: Any) -> str:
+        """Estrae solo il testo se il prompt è multimodale (lista)."""
+        if isinstance(prompt, list):
+            # Cerca parti testuali
+            text_parts = [p for p in prompt if isinstance(p, str)]
+            if len(text_parts) < len(prompt):
+                print(f"⚠️ Ollama: Multimodal inputs ignored for model {self.model_name}. Using text only.")
+            return "\n".join(text_parts)
+        return str(prompt)
+
+    def generate_content(self, prompt: Any):
         """Esegue la chiamata a Ollama."""
         try:
+            prompt_text = self._extract_text_from_multimodal(prompt)
+            
             # Opzioni per forzare l'uso della GPU
             options = {
                 'num_gpu': 999  # Forza l'offset di tutti i layer sulla GPU
@@ -36,7 +48,7 @@ class OllamaWrapper:
             # Simuliamo la struttura di risposta di Gemini
             response = ollama.chat(
                 model=self.model_name,
-                messages=[{'role': 'user', 'content': prompt}],
+                messages=[{'role': 'user', 'content': prompt_text}],
                 format=format_param,
                 options=options
             )
@@ -51,14 +63,15 @@ class OllamaWrapper:
             print(f"❌ Errore Ollama ({self.model_name}): {e}")
             raise e
 
-    def generate_stream(self, prompt: str):
+    def generate_stream(self, prompt: Any):
         """Esegue la chiamata a Ollama in streaming."""
         try:
+            prompt_text = self._extract_text_from_multimodal(prompt)
             options = {'num_gpu': 999}
             
             stream = ollama.chat(
                 model=self.model_name,
-                messages=[{'role': 'user', 'content': prompt}],
+                messages=[{'role': 'user', 'content': prompt_text}],
                 stream=True,
                 options=options
             )
@@ -153,7 +166,7 @@ class AIProvider:
     
     DOCS_URL = "https://ai.google.dev/gemini-api/docs/models?hl=it"
     # Fallback solidi per Gemini: Rimosso 2.0-flash per instabilità (429 errors)
-    FALLBACK_ORDER = ["gemini-3-pro-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro","gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
+    FALLBACK_ORDER = ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro","gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
     
     _cached_chain: Optional[List[str]] = None
     _last_scrape_time: float = 0

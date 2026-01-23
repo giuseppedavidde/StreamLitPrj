@@ -93,10 +93,23 @@ if 'ai_provider' in st.session_state and st.session_state['ai_provider']:
              with st.chat_message(msg["role"]):
                 st.write(msg["content"])
         
+        # Files Uploader
+        uploaded_files = st.file_uploader(
+            "Allega file (Immagini/PDF)", 
+            type=['png', 'jpg', 'jpeg', 'pdf'], 
+            accept_multiple_files=True,
+            key="chat_file_uploader"
+        )
+
         if user_prompt := st.chat_input("Chiedi al Portfolio Advisor...", key="sidebar_chat_input"):
-            st.session_state.chat_history.append({"role": "user", "content": user_prompt})
+            # Prepare message content
+            display_msg = user_prompt
+            if uploaded_files:
+                display_msg += f"\n\n📎 *{len(uploaded_files)} file allegati*"
+
+            st.session_state.chat_history.append({"role": "user", "content": display_msg})
             with st.chat_message("user"):
-                st.write(user_prompt)
+                st.write(display_msg)
             
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
@@ -131,7 +144,23 @@ if 'ai_provider' in st.session_state and st.session_state['ai_provider']:
                         else:
                              system_msg += " Non hai accesso ai dati del portafoglio al momento. Rispondi genericamente."
 
-                        final_prompt = f"{system_msg}\n\nDOMANDA UTENTE: {user_prompt}"
+                        final_prompt_text = f"{system_msg}\n\nDOMANDA UTENTE: {user_prompt}"
+                        
+                        # Construct Prompt (List if files present)
+                        final_prompt = [final_prompt_text]
+                        
+                        if uploaded_files:
+                            for uploaded_file in uploaded_files:
+                                bytes_data = uploaded_file.getvalue()
+                                mime_type = uploaded_file.type
+                                final_prompt.append({
+                                    "mime_type": mime_type,
+                                    "data": bytes_data
+                                })
+
+                        # If only text, pass string (cleaner debug)
+                        if len(final_prompt) == 1:
+                            final_prompt = final_prompt[0]
                         
                         stream = st.session_state['ai_provider'].get_model().generate_stream(final_prompt)
                         response = st.write_stream(stream)
