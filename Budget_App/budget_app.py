@@ -610,14 +610,26 @@ if not df.empty:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
+            # File Uploader per Chat
+            uploaded_files = st.file_uploader(
+                "Allega file (Immagini/PDF)", 
+                type=['png', 'jpg', 'jpeg', 'pdf'], 
+                accept_multiple_files=True,
+                key="chat_file_uploader_budget"
+            )
+
             # 3. Input Utente
             if prompt := st.chat_input("Chiedi qualcosa sui tuoi numeri..."):
-                # Aggiungi messaggio utente
-                st.session_state.messages.append({"role": "user", "content": prompt})
-                with st.chat_message("user"):
-                    st.markdown(prompt)
+                # Prepare display message
+                display_msg = prompt
+                if uploaded_files:
+                    display_msg += f"\n\n📎 *{len(uploaded_files)} file allegati*"
 
-                # 4. Generazione Risposta
+                # Aggiungi messaggio utente
+                st.session_state.messages.append({"role": "user", "content": display_msg})
+                with st.chat_message("user"):
+                    st.markdown(display_msg)
+
                 # 4. Generazione Risposta
                 with st.chat_message("assistant"):
                     # Preparazione Contesto Dati
@@ -652,8 +664,22 @@ if not df.empty:
                     try:
                         # Costruzione Prompt Completo
                         system_context = get_data_context(df)
-                        final_prompt = f"{system_context}\n\nDOMANDA UTENTE: {prompt}"
+                        final_prompt_text = f"{system_context}\n\nDOMANDA UTENTE: {prompt}"
                         
+                        # Handle Multimodal Inputs
+                        final_prompt = [final_prompt_text]
+                        if uploaded_files:
+                            for uploaded_file in uploaded_files:
+                                bytes_data = uploaded_file.getvalue()
+                                mime_type = uploaded_file.type
+                                final_prompt.append({
+                                    "mime_type": mime_type,
+                                    "data": bytes_data
+                                })
+                        
+                        if len(final_prompt) == 1:
+                            final_prompt = final_prompt[0]
+
                         # Streaming
                         stream_gen = st.session_state['ai_provider'].get_model().generate_stream(final_prompt)
                         response_text = st.write_stream(stream_gen)

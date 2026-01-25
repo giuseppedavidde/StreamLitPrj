@@ -6,3 +6,4 @@ agents/__pycache__/*.pyc
 verif*
 check_*.py
 tests_*
+*pycache*
