@@ -14,10 +14,12 @@ load_dotenv()
 try:
     from agents.ai_provider import AIProvider
     from agents.cloud_manager import CloudManager
+    from agents.bank_importer import BankImporter
 except ImportError as e:
     st.error(f"Modulo 'agents' non trovato o errore importazione: {e}")
     AIProvider = None 
     CloudManager = None
+    BankImporter = None
 
 # Configurazione Pagina
 st.set_page_config(page_title="Budget Manager", page_icon="💰", layout="wide")
@@ -507,6 +509,183 @@ if not df.empty:
     # --- PAGINA GESTIONE MESE (AGGIUNGI/INCREMENTA) ---
     elif page == "Gestione Mese":
         st.header("➕ Gestione Mese")
+
+        # --- SEZIONE IMPORTAZIONE BANCA (AI) ---
+        with st.expander("📂 Importa da Estratto Conto Banca (AI)", expanded=True):
+            st.info("Carica il file CSV della banca (es. 'Cointestato...'). L'AI categorizzerà le spese e creerà il report.")
+            
+            uploaded_bank_file = st.file_uploader("Carica CSV Banca", type=["csv"], key="bank_uploader")
+            
+            if uploaded_bank_file is not None and BankImporter:
+                # Check AI Provider
+                if 'ai_provider' not in st.session_state or st.session_state['ai_provider'] is None:
+                    st.error("⚠️ AI non configurata! Configurala nella sidebar 'Assistant AI' o Dashboard.")
+                else:
+                    if st.button("🚀 Analizza e Categorizza"):
+                        progress_bar = st.progress(0, text="Avvio analisi...")
+                        try:
+                            importer = BankImporter(st.session_state['ai_provider'])
+                            target_cats = income_cols + expense_cols
+                            
+                            # Callback wrapper
+                            def update_progress(p, msg):
+                                progress_bar.progress(p, text=msg)
+
+                            # Process function
+                            results = importer.process_file(uploaded_bank_file, target_cats, income_cols, progress_callback=update_progress)
+                            
+                            # Store results AND importer instance (for re-aggregation)
+                            st.session_state['import_results'] = results
+                            # Store the importer instance temporarily? Can't pickle AI provider easily sometimes.
+                            # But Aggregation logic is stateless in the class, so we can re-instantiate or just use the class method if static.
+                            # Wait, aggregate_data uses 'self' only if needed. In my code it doesn't use self. 
+                            # But better to just instantiate a dummy or keep it lightweight.
+                            # Actually, we can just save the detailed_df and do aggregation on the fly.
+                            
+                            st.success("Analisi Completata!")
+                            time.sleep(1)
+                            progress_bar.empty()
+                        except Exception as e:
+                            st.error(f"Errore durante l'analisi: {e}")
+
+            # Show Results if available
+            if 'import_results' in st.session_state:
+                results = st.session_state['import_results']
+                detailed_df = results['detailed_df']
+                report_md = results.get('report_md', "")
+                agg_df = results['aggregated_df'] # Current aggregated
+                
+                st.subheader("🔍 Revisione Categorizzazione")
+                
+                # 1. REPORT VIEW (Read Only - Mobile Friendly)
+                with st.expander("📄 Vedi Report Dettagliato", expanded=True):
+                    st.markdown(report_md)
+
+                # 2. EDITING SECTION
+                st.markdown("### 🛠️ Correzioni Rapide")
+                
+                # Create readable labels for the selectbox
+                # We use the dataframe index to track selection
+                def format_func(idx):
+                    row = detailed_df.loc[idx]
+                    date_str = str(row['Buchungsdatum'])
+                    desc = row['Umsatztext'][:25] + "..."
+                    amt = f"€{row['Betrag_Float']:.2f}"
+                    cat = row['New_Category']
+                    return f"{date_str} | {amt} | {cat} | {desc}"
+                
+                # Filter out deleted rows if any (though we usually drop them from DF)
+                valid_indices = detailed_df.index.tolist()
+                
+                if not valid_indices:
+                     st.info("Nessuna transazione disponibile.")
+                else:
+                    selected_idx = st.selectbox(
+                        "Seleziona transazione da modificare:",
+                        valid_indices,
+                        format_func=format_func,
+                        key="edit_transaction_select"
+                    )
+                    
+                    if selected_idx is not None:
+                        sel_row = detailed_df.loc[selected_idx]
+                        
+                        col_edit_1, col_edit_2 = st.columns([2, 1])
+                        
+                        with col_edit_1:
+                            target_cats = sorted(income_cols + expense_cols)
+                            current_cat_idx = 0
+                            if sel_row['New_Category'] in target_cats:
+                                current_cat_idx = target_cats.index(sel_row['New_Category'])
+                                
+                            new_cat_manual = st.selectbox(
+                                "Modifica Categoria:", 
+                                target_cats, 
+                                index=current_cat_idx,
+                                key="manual_cat_picker"
+                            )
+                        
+                        # Actions
+                        col_btn_1, col_btn_2 = st.columns(2)
+                        
+                        if col_btn_1.button("✅ Aggiorna", type="secondary"):
+                            # Update DF
+                            detailed_df.at[selected_idx, 'New_Category'] = new_cat_manual
+                            
+                            # Re-Calculate everything
+                            dummy_importer = BankImporter(None)
+                            new_agg = dummy_importer.aggregate_data(detailed_df, target_cats, income_cols)
+                            new_rep = dummy_importer.generate_report(detailed_df)
+                            
+                            # Save back to state
+                            st.session_state['import_results']['detailed_df'] = detailed_df
+                            st.session_state['import_results']['aggregated_df'] = new_agg
+                            st.session_state['import_results']['report_md'] = new_rep
+                            
+                            st.toast("Categoria Aggiornata!")
+                            time.sleep(0.5)
+                            st.rerun()
+                            
+                        if col_btn_2.button("🗑️ Elimina Riga", type="primary"):
+                            # Delete row
+                            detailed_df = detailed_df.drop(selected_idx)
+                            
+                            # Re-Calculate everything
+                            dummy_importer = BankImporter(None)
+                            new_agg = dummy_importer.aggregate_data(detailed_df, target_cats, income_cols)
+                            new_rep = dummy_importer.generate_report(detailed_df)
+
+                            # Save back to state
+                            st.session_state['import_results']['detailed_df'] = detailed_df
+                            st.session_state['import_results']['aggregated_df'] = new_agg
+                            st.session_state['import_results']['report_md'] = new_rep
+                            
+                            st.toast("Transazione Eliminata!")
+                            time.sleep(0.5)
+                            st.rerun()
+
+                st.divider()
+                st.subheader("📊 Totali Mensili (Anteprima)")
+                st.dataframe(agg_df)
+                
+                # Confirm Import
+                if st.button("💾 Conferma e Salva nel Database", type="primary"):
+                    try:
+                        # Logic to merge agg_df into main df
+                        for _, new_row in agg_df.iterrows():
+                            year = new_row['Year']
+                            month = new_row['Month']
+                            
+                            # Check if exists
+                            mask = (df['Year'] == year) & (df['Month'] == month)
+                            
+                            if df[mask].any().any():
+                                # Update existing: INCREMENTAL UPDATE (Add to existing)
+                                for col in agg_df.columns:
+                                    if col in df.columns and col not in ['Year', 'Month', 'MonthNum']:
+                                        # Use += to add new imported amounts to existing database values
+                                        df.loc[mask, col] += new_row[col]
+                                st.toast(f"Aggiornato mese {month} {year} (Incrementale)", icon="➕")
+                            else:
+                                # Append new
+                                valid_cols = [c for c in agg_df.columns if c in df.columns]
+                                filtered_row = new_row[valid_cols].to_frame().T
+                                df = pd.concat([df, filtered_row], ignore_index=True)
+                                st.toast(f"Creato nuovo mese {month} {year}", icon="✨")
+                                
+                        save_data(df)
+                        st.success("Importazione completata con successo! I dati sono stati salvati.")
+                        
+                        # Clear session state
+                        del st.session_state['import_results']
+                        time.sleep(2)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Errore durante il salvataggio: {e}")
+
+        st.divider()
+        st.write("Oppure gestisci manualmente:")
         st.write("Seleziona il mese e l'anno. Se il mese esiste già, potrai **aggiungere** importi a quelli esistenti (incrementale). Se non esiste, verrà creato.")
         
         # Selezione Periodo (fuori dal form per permettere refresh logico)
