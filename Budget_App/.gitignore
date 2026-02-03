@@ -31,3 +31,4 @@ fix_csv.py
 verify_fix.py
 Budget semplice/*
 budget_database.csv.bak
+Export_from_Bank/*
