@@ -74,11 +74,4 @@ All'apertura, vedrai una panoramica completa.
 6.  Controlla la tabella dei risultati. Se necessario, correggi le categorie errate dal menu a tendina.
 7.  Clicca **"Salva Modifiche"** per archiviare il mese.
 
----
 
-## 🖼️ Anteprima
-
-*(Aggiungi qui screenshot della Dashboard e della fase di Importazione)*
-
-![Dashboard Example](path/to/screenshot_dashboard.png)
-![AI Import Example](path/to/screenshot_import.png)

@@ -14,11 +14,19 @@ from google.api_core.exceptions import (
     ResourceExhausted, ServiceUnavailable, NotFound, InvalidArgument, InternalServerError
 )
 
-# Tentativo di importazione sicura per Ollama
+# Tentativo di importazione sicura per Ollama e PyMuPDF (fitz)
 try:
     OLLAMA_AVAILABLE = True
 except ImportError:
     OLLAMA_AVAILABLE = False
+    
+try:
+    import fitz  # PyMuPDF
+    import io
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    fitz = None
 
 class OllamaWrapper:
     """Wrapper per chiamate a modelli locali via Ollama."""
@@ -26,38 +34,107 @@ class OllamaWrapper:
         self.model_name = model_name
         self.json_mode = json_mode
 
-    def _extract_text_from_multimodal(self, prompt: Any) -> str:
-        """Estrae solo il testo se il prompt è multimodale (lista)."""
+    def _process_multimodal_input(self, prompt: Any) -> tuple[str, list]:
+        """
+        Estrae testo e immagini dal prompt multimodale.
+        Converte PDF in testo usando PyMuPDF per maggiore robustezza.
+        """
+        final_text_parts = []
+        images = []
+        
+        print(f"🤖 Ollama Pre-processing: Analizzando input per {self.model_name}...")
+        
         if isinstance(prompt, list):
-            # Cerca parti testuali
-            text_parts = [p for p in prompt if isinstance(p, str)]
-            if len(text_parts) < len(prompt):
-                print(f"⚠️ Ollama: Multimodal inputs ignored for model {self.model_name}. Using text only.")
-            return "\n".join(text_parts)
-        return str(prompt)
+            for i, part in enumerate(prompt):
+                if isinstance(part, str):
+                    final_text_parts.append(part)
+                elif isinstance(part, dict) and 'mime_type' in part and 'data' in part:
+                    mime = part['mime_type']
+                    data = part['data']
+                    size_kb = len(data) / 1024
+                    
+                    print(f"   -> Part {i}: Rilevato {mime} ({size_kb:.1f} KB)")
+                    
+                    if mime == 'application/pdf':
+                        # PDF Text Extraction Handling with PyMuPDF
+                        if PYMUPDF_AVAILABLE:
+                            try:
+                                print("      -> Avvio estrazione PDF con PyMuPDF...")
+                                doc = fitz.open(stream=data, filetype="pdf")
+                                text_content = []
+                                for page_num, page in enumerate(doc):
+                                    page_text = page.get_text()
+                                    if page_text.strip():
+                                        text_content.append(page_text)
+                                    print(f"         Pagina {page_num+1}: {len(page_text)} caratteri estratti.")
+                                
+                                extracted = "\n".join(text_content)
+                                if extracted.strip():
+                                    final_text_parts.append(f"\n--- INIZIO CONTENUTO PDF ---\n{extracted}\n--- FINE CONTENUTO PDF ---\n")
+                                    print("      ✅ Estrazione completata con successo.")
+                                else:
+                                    print("      ⚠️ WARNING: Il PDF sembra vuoto o contiene solo immagini (no OCR).")
+                            except Exception as e:
+                                print(f"      ❌ Errore critico lettura PDF: {e}")
+                        else:
+                            print("      ❌ PyMuPDF non installato! Impossibile leggere PDF.")
+                    elif mime.startswith('image/'):
+                        images.append(data)
+                        print("      -> Immagine aggiunta al payload.")
+                    else:
+                        print(f"      ⚠️ MIME type {mime} non supportato, ignorato.")
+        else:
+            final_text_parts.append(str(prompt))
+            
+        full_text = "\n".join(final_text_parts)
+        print(f"📝 Prompt finale: {len(full_text)} caratteri, {len(images)} immagini.")
+        return full_text, images
 
     def generate_content(self, prompt: Any):
         """Esegue la chiamata a Ollama."""
         try:
-            prompt_text = self._extract_text_from_multimodal(prompt)
+            prompt_text, images = self._process_multimodal_input(prompt)
             
-            # Opzioni per forzare l'uso della GPU
+            # Opzioni per forzare l'uso della GPU e Context Size adeguato
             options = {
-                'num_gpu': 999  # Forza l'offset di tutti i layer sulla GPU
+                'num_gpu': 999,
+                'num_ctx': 4096, # Ridotto per stabilità su GPU integrate
+                'temperature': 0.0 # Bassa temperatura per estrazione dati
             }
             format_param = 'json' if self.json_mode else None
             
-            # Simuliamo la struttura di risposta di Gemini
-            response = ollama.chat(
-                model=self.model_name,
-                messages=[{'role': 'user', 'content': prompt_text}],
-                format=format_param,
-                options=options
-            )
+            # Parametri chiamata
+            kwargs = {
+                'model': self.model_name,
+                'messages': [{'role': 'user', 'content': prompt_text}],
+                'format': format_param,
+                'options': options,
+                'stream': True # Usiamo stream interna per debug
+            }
+            
+            if images:
+                # Aggiungi immagini al messaggio utente
+                kwargs['messages'][0]['images'] = images
+
+            print(f"⏳ Ollama: Invio richiesta a {self.model_name} (Ctx: 4096, Temp: 0)...")
+            start_t = time.time()
+            
+            full_response = ""
+            stream = ollama.chat(**kwargs)
+            
+            print("   Receiving: ", end="", flush=True)
+            for chunk in stream:
+                part = chunk.get('message', {}).get('content', '')
+                full_response += part
+                print(".", end="", flush=True) # Feedback visivo
+            print(" Done.")
+            
+            duration = time.time() - start_t
+            print(f"✅ Ollama: Risposta ricevuta in {duration:.2f}s. Lunghezza: {len(full_response)} chars.")
             
             class Response:
                 """Response wrapper per uniformità."""
-                text = response.get('message', {}).get('content', '')
+                text = full_response
             
             return Response()
             
@@ -68,15 +145,20 @@ class OllamaWrapper:
     def generate_stream(self, prompt: Any):
         """Esegue la chiamata a Ollama in streaming."""
         try:
-            prompt_text = self._extract_text_from_multimodal(prompt)
+            prompt_text, images = self._process_multimodal_input(prompt)
             options = {'num_gpu': 999}
             
-            stream = ollama.chat(
-                model=self.model_name,
-                messages=[{'role': 'user', 'content': prompt_text}],
-                stream=True,
-                options=options
-            )
+            kwargs = {
+                'model': self.model_name,
+                'messages': [{'role': 'user', 'content': prompt_text}],
+                'stream': True,
+                'options': options
+            }
+            
+            if images:
+                kwargs['messages'][0]['images'] = images
+            
+            stream = ollama.chat(**kwargs)
             
             for chunk in stream:
                 content = chunk.get('message', {}).get('content', '')
