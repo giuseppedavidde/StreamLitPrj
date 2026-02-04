@@ -56,7 +56,7 @@ class BankImporter:
 
     def process_file(self, file_buffer, target_categories, income_cols, progress_callback=None):
         """
-        Processes the uploaded bank file.
+        Processes the uploaded bank file (CSV or PDF).
         
         Args:
             file_buffer: The file object from streamlit uploader.
@@ -71,16 +71,35 @@ class BankImporter:
                 'report_md': Markdown string for the comparison report.
             }
         """
+        # 0. Detect File Type
+        file_name = file_buffer.name.lower()
+        
         # 1. Load Data
-        df = self._load_csv(file_buffer)
+        df = None
+        if file_name.endswith('.pdf'):
+            if progress_callback:
+                progress_callback(0.0, "Estrazione dati da PDF (Multimodale)...")
+            try:
+                # Read bytes for PDF
+                pdf_bytes = file_buffer.getvalue()
+                df = self._extract_from_pdf(pdf_bytes)
+            except Exception as e:
+                raise ValueError(f"Errore estrazione PDF: {e}")
+        else:
+            # Assume CSV
+            df = self._load_csv(file_buffer)
+            
         if df is None or df.empty:
-            raise ValueError("CSV file is empty or could not be read.")
+            raise ValueError("File is empty or could not be read.")
 
-        # 2. Prepare for AI
+        # 2. Prepare for AI Categorization
         model = self.ai_provider.get_model(json_mode=True)
         mappings = {}
         
-        # Keep original category for comparison
+        # Keep original category for comparison (if present, else empty)
+        if 'Kategorie' not in df.columns:
+            df['Kategorie'] = 'Da Categorizzare'
+            
         df['Analyzed_Category'] = df['Kategorie'] 
 
         items_to_process = []
@@ -97,14 +116,19 @@ class BankImporter:
             })
 
         # 3. Process in Batches
+        
         BATCH_SIZE = 20
         total_batches = (len(items_to_process) + BATCH_SIZE - 1) // BATCH_SIZE
         
         for i in range(0, len(items_to_process), BATCH_SIZE):
             current_batch_num = i // BATCH_SIZE + 1
             if progress_callback:
-                percent = i / len(items_to_process)
+                # Adjust progress to account for PDF step
+                base_c = 0.2 if file_name.endswith('.pdf') else 0.0
+                percent = base_c + (i / len(items_to_process)) * (0.9 - base_c)
                 progress_callback(percent, f"Analisi AI in corso: Batch {current_batch_num}/{total_batches}...")
+            
+            # ... batch processing logic calls model ... 
             
             batch = items_to_process[i:i+BATCH_SIZE]
             
@@ -189,6 +213,55 @@ class BankImporter:
             'aggregated_df': aggregated_df,
             'report_md': report_md
         }
+
+    def _extract_from_pdf(self, pdf_bytes):
+        """Extracts transactions from PDF bytes using Multimodal AI."""
+        prompt = """
+        Extract ALL bank transactions from this PDF statement.
+        Return a JSON list of objects with these exact fields:
+        - "Buchungsdatum": Date DD.MM.YYYY
+        - "Umsatztext": Description/Payee
+        - "Betrag": Amount as string (e.g. "-12,50" or "1.200,00"). Use European format.
+        
+        Example JSON:
+        [
+          {"Buchungsdatum": "01.01.2024", "Umsatztext": "Amazon", "Betrag": "-25,90"},
+          {"Buchungsdatum": "15.01.2024", "Umsatztext": "Salary", "Betrag": "2500,00"}
+        ]
+        """
+        
+        model = self.ai_provider.get_model(json_mode=True)
+        
+        # Multimodal call: [Text, PDF_Bytes]
+        # AIProvider wrapper (GeminiWrapper) usually handles list if valid.
+        # We need to pass mime_type wrapper or raw bytes if supported.
+        # Checking AIProvider implementation from context:
+        # It handles `final_prompt` which can be structure with mime_type.
+        
+
+        
+        request_content = [
+            prompt,
+            {"mime_type": "application/pdf", "data": pdf_bytes}
+        ]
+        
+        response = model.generate_content(request_content)
+        text_resp = response.text if hasattr(response, 'text') else str(response)
+        
+        # Clean markdown
+        if "```json" in text_resp:
+            text_resp = text_resp.replace("```json", "").replace("```", "")
+        
+        data = json.loads(text_resp)
+        
+        # Use 'transactions' key if wrapped, else assume list
+        if isinstance(data, dict):
+            data = data.get('transactions', data.get('items', []))
+            
+        df = pd.DataFrame(data)
+        
+        return df 
+
 
     def generate_report(self, df):
         """Generates a markdown table highlighting changes."""

@@ -1,5 +1,5 @@
 """Modulo AI Provider per la selezione dinamica del modello Gemini e Ollama."""
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Union, Iterator
 import os
 import time
 import random
@@ -7,7 +7,9 @@ import re
 import ollama
 import requests
 from bs4 import BeautifulSoup
-import google.generativeai as genai
+
+from google import genai
+from google.genai import types
 from google.api_core.exceptions import (
     ResourceExhausted, ServiceUnavailable, NotFound, InvalidArgument, InternalServerError
 )
@@ -85,22 +87,31 @@ class OllamaWrapper:
             yield f"❌ Errore Ollama Stream: {e}"
 
 class GeminiWrapper:
-    """Wrapper per Google Gemini con gestione retry e backoff."""
+    """Wrapper per Google Gemini con gestione retry e backoff (Google GenAI SDK v1)."""
     def __init__(self, provider, json_mode: bool):
         self.provider = provider
         self.json_mode = json_mode
-        self._refresh_model()
+        self.client = genai.Client(api_key=self.provider.api_key)
 
-    def _refresh_model(self):
-        config = None
-        if self.json_mode:
-            config = genai.types.GenerationConfig( # pyright: ignore[reportPrivateImportUsage]
-                response_mime_type="application/json"
-            )
-        self.real_model = genai.GenerativeModel( # pyright: ignore[reportPrivateImportUsage]
-            model_name=self.provider.current_model_name,
-            generation_config=config
-        )
+    def _prepare_contents(self, prompt: Any) -> list:
+        """Prepara il contenuto per la nuova API."""
+        contents = []
+        if isinstance(prompt, str):
+            contents.append(prompt)
+        elif isinstance(prompt, list):
+            for part in prompt:
+                if isinstance(part, str):
+                    contents.append(part)
+                elif isinstance(part, dict) and 'mime_type' in part and 'data' in part:
+                    # Handle raw bytes input (custom standard used in this project)
+                    contents.append(types.Part.from_bytes(
+                        data=part['data'],
+                        mime_type=part['mime_type']
+                    ))
+                else:
+                    # Fallback string
+                    contents.append(str(part))
+        return contents
 
     def generate_content(self, prompt):
         """Genera contenuto con Exponential Backoff."""
@@ -108,10 +119,22 @@ class GeminiWrapper:
         base_delay = 2
         last_error = None
         
+        # Config
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json" if self.json_mode else "text/plain"
+        )
+        
+        contents = self._prepare_contents(prompt)
+
         for attempt in range(max_retries):
             try:
                 start_time = time.time()
-                response = self.real_model.generate_content(prompt)
+                
+                response = self.client.models.generate_content(
+                    model=self.provider.current_model_name,
+                    contents=contents,
+                    config=config
+                )
                 
                 # Logging Token Usage e Modello
                 try:
@@ -134,7 +157,7 @@ class GeminiWrapper:
                 self.provider.log_debug(f"⚠️ Quota 429. Attendo {wait:.1f}s...")
                 time.sleep(wait)
                 if attempt >= 2 and self.provider.downgrade_model():
-                    self._refresh_model()
+                    pass # Retry with new model
             except (ServiceUnavailable, InternalServerError) as e:
                 last_error = e
                 time.sleep(5)
@@ -142,7 +165,7 @@ class GeminiWrapper:
                 last_error = e
                 self.provider.log_debug(f"❌ Errore Modello {e}. Switching...")
                 if self.provider.downgrade_model():
-                    self._refresh_model()
+                    pass
                 else:
                     break
             except Exception as e: # pylint: disable=broad-exception-caught
@@ -155,7 +178,11 @@ class GeminiWrapper:
     def generate_stream(self, prompt):
         """Genera contenuto in streaming."""
         try:
-            response = self.real_model.generate_content(prompt, stream=True)
+            contents = self._prepare_contents(prompt)
+            response = self.client.models.generate_content_stream(
+                model=self.provider.current_model_name,
+                contents=contents
+            )
             for chunk in response:
                 yield chunk.text
         except Exception as e:
@@ -196,7 +223,7 @@ class AIProvider:
                 print("⚠️ API Key mancante per Gemini. Impossibile inizializzare.")
                 return 
             
-            genai.configure(api_key=self.api_key) # pyright: ignore[reportPrivateImportUsage]
+            # genai.configure NOT needed for Client
             self._init_gemini_chain()
         
         elif self.provider_type == "ollama":
@@ -268,6 +295,7 @@ class AIProvider:
             if response.status_code != 200: return []
             soup = BeautifulSoup(response.text, 'html.parser')
             text = soup.get_text()
+            # Simple regex to catch model names from text, fallback logic applies otherwise
             candidates = set(re.findall(r"(gemini-[a-zA-Z0-9\-\.]+)", text))
             valid = [m for m in candidates if "vision" not in m and "audio" not in m and "tts" not in m]
             # Prioritizza quelli con 'flash' o 'pro'

@@ -2,7 +2,7 @@ streamlit
 pandas
 plotly
 ollama
-google-generativeai
+google-genai
 beautifulsoup4
 requests
 python-dotenv

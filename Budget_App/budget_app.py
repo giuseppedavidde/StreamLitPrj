@@ -118,6 +118,12 @@ if not df.empty:
         df_sorted_asc = df.sort_values('DateObj', ascending=True)
         df_sorted_asc['Patrimonio'] = df_sorted_asc['Reddito meno spese'].cumsum()
         
+        # Calcolo Cumulativo Investimenti
+        if 'Investimenti' in df_sorted_asc.columns:
+            df_sorted_asc['Investimenti_Cumulativo'] = df_sorted_asc['Investimenti'].fillna(0).cumsum()
+        else:
+            df_sorted_asc['Investimenti_Cumulativo'] = 0.0
+        
         # Ri-ordiniamo decrescente per la visualizzazione (Mese corrente in alto)
         df = df_sorted_asc.sort_values('DateObj', ascending=False)
         
@@ -181,44 +187,63 @@ if not df.empty:
         selected_row = df[(df['Month'] == sel_month) & (df['Year'] == sel_year)].iloc[0]
         
         # --- 2. NET WORTH & GROWTH (Top Section) ---
-        # Calcolo Delta Patrimonio nell'orizzonte temporale selezionato
+        # Calcolo Delta Patrimonio e Investimenti nell'orizzonte temporale selezionato
         current_net_worth = selected_row['Patrimonio']
+        current_invested = selected_row.get('Investimenti_Cumulativo', 0.0)
         
+        # Init vars
         growth_val = 0
         growth_pct = 0
         has_growth_data = False
         
+        inv_growth_val = 0
+        inv_growth_pct = 0
+        has_inv_growth = False
+        
         if selected_time_window != "All":
             months_back = int(selected_time_window)
-            # Troviamo la riga di N mesi fa (approssimato per indice se i dati sono contigui, 
-            # ma meglio usare shift o ricerca data. Qui assumiamo continuità per semplicità o cerchiamo nel df)
-            # Cerchiamo la data target
             target_date = selected_row['DateObj'] - pd.DateOffset(months=months_back)
-            # Troviamo il record più vicino (o esatto) nel passato
             past_records = df[df['DateObj'] <= target_date]
             
             if not past_records.empty:
-                past_row = past_records.iloc[0] # Il primo è il più recente tra quelli passati (essendo ordinato desc)
+                past_row = past_records.iloc[0]
+                
+                # Net Worth Delta
                 past_net_worth = past_row['Patrimonio']
                 growth_val = current_net_worth - past_net_worth
                 growth_pct = (growth_val / abs(past_net_worth) * 100) if past_net_worth != 0 else 0
                 has_growth_data = True
+                
+                # Investment Delta
+                past_invested = past_row.get('Investimenti_Cumulativo', 0.0)
+                inv_growth_val = current_invested - past_invested
+                inv_growth_pct = (inv_growth_val / abs(past_invested) * 100) if past_invested != 0 else 0
+                has_inv_growth = True
         else:
-             # All time growth (scartando il valore iniziale se 0, o semplicemente totale accumulato)
-             # Patrimonio è cumulativo, quindi 'growth' all time è sostanzialmente il valore attuale (se partiti da 0)
+             # All time
              growth_val = current_net_worth
              has_growth_data = True
+             
+             inv_growth_val = current_invested
+             has_inv_growth = True
 
         # Display Top Metrics
         with st.container(border=True):
-            tc1, tc2 = st.columns([3, 1])
+            tc1, tc2, tc3 = st.columns([2, 2, 1])
+            
             tc1.metric(
                 label="🏦 PATRIMONIO TOTALE PROIETTATO", 
                 value=f"€ {current_net_worth:,.2f}", 
-                delta=f"{'+' if growth_val >= 0 else ''}€ {growth_val:,.2f} ({growth_pct:.1f}%) negli ultimi {selected_time_window} mesi" if has_growth_data else None
+                delta=f"{'+' if growth_val >= 0 else ''}€ {growth_val:,.2f} ({growth_pct:.1f}%)" if has_growth_data else None
             )
-            # Mini sparkline o info extra? Mettiamo data riferimento
-            tc2.caption(f"Al {selected_row['Month']} {selected_row['Year']}")
+            
+            tc2.metric(
+                label="📈 TOTALE INVESTITO PROIETTATO",
+                value=f"€ {current_invested:,.2f}",
+                delta=f"{'+' if inv_growth_val >= 0 else ''}€ {inv_growth_val:,.2f} ({inv_growth_pct:.1f}%)" if has_inv_growth else None
+            )
+
+            tc3.caption(f"Dati al:\n{selected_row['Month']} {selected_row['Year']}\n(Orizzonte {selected_time_window} mesi)")
 
 
         # --- 3. TOP ROW (Gauge + KPI) ---
@@ -512,9 +537,9 @@ if not df.empty:
 
         # --- SEZIONE IMPORTAZIONE BANCA (AI) ---
         with st.expander("📂 Importa da Estratto Conto Banca (AI)", expanded=True):
-            st.info("Carica il file CSV della banca (es. 'Cointestato...'). L'AI categorizzerà le spese e creerà il report.")
+            st.info("Carica il file della banca (CSV o PDF). L'AI estrarrà e categorizzerà le spese.")
             
-            uploaded_bank_file = st.file_uploader("Carica CSV Banca", type=["csv"], key="bank_uploader")
+            uploaded_bank_file = st.file_uploader("Carica File Banca", type=["csv", "pdf"], key="bank_uploader")
             
             if uploaded_bank_file is not None and BankImporter:
                 # Check AI Provider
@@ -549,7 +574,7 @@ if not df.empty:
                             st.error(f"Errore durante l'analisi: {e}")
 
             # Show Results if available
-            if 'import_results' in st.session_state:
+            if 'import_results' in st.session_state and st.session_state['import_results'] is not None:
                 results = st.session_state['import_results']
                 detailed_df = results['detailed_df']
                 report_md = results.get('report_md', "")
