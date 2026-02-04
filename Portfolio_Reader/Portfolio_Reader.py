@@ -223,7 +223,7 @@ if df_portfolio is not None:
     st.sidebar.header("🛠️ Gestione Portfolio")
     
     with st.sidebar.expander("➕ Aggiungi Transazione", expanded=True):
-        with st.form("add_transaction_form"):
+        with st.container(): # Form removed to allow interactive UI (Currency Label)
             # Get Tickers for suggestions
             ticker_col_name = "Symbol" if "Symbol" in df_portfolio.columns else df_portfolio.columns[0]
             existing_tickers = sorted(df_portfolio[ticker_col_name].astype(str).unique().tolist())
@@ -237,14 +237,24 @@ if df_portfolio is not None:
             elif selected_ticker_opt != "-- Seleziona --":
                  new_ticker = selected_ticker_opt
             
-            broker = st.selectbox("Broker", ["Trade Republic", "Flatex", "Other"], index=0)
+            c1, c2 = st.columns(2)
+            with c1:
+                broker = st.selectbox("Broker", ["Trade Republic", "Flatex", "Others"], index=0)
+            with c2:
+                currency = st.radio("Valuta Transazione", ["EUR", "USD"], horizontal=True)
+            
             txn_type = st.selectbox("Tipo", ["Buy", "Sell"], index=0)
             
-            shares = st.number_input("Quote (Shares)", min_value=0.0, value=0.0, step=0.000001, format="%.6f")
-            price_per_share = st.number_input("Prezzo per Quota (EUR)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
+            c3, c4 = st.columns(2)
+            with c3:
+                shares = st.number_input("Quote (Shares)", min_value=0.0, value=0.0, step=0.000001, format="%.6f")
+            with c4:
+                price_label = f"Prezzo per Quota ({currency})"
+                price_per_share = st.number_input(price_label, min_value=0.0, value=0.0, step=0.01, format="%.2f")
+            
             txn_date = st.date_input("Data Transazione", value=pd.Timestamp.today())
             
-            submitted = st.form_submit_button("Aggiungi / Aggiorna")
+            submitted = st.button("Aggiungi / Aggiorna")
             
             if submitted:
                 if not new_ticker:
@@ -270,7 +280,7 @@ if df_portfolio is not None:
                             idx = df.index[-1]
                             st.info(f"Nuovo Ticker {new_ticker} creato.")
 
-                        # 2. Broker specific updates
+                        # 2. Broker specific updates (EUR ONLY)
                         def get_val(r, c):
                             try:
                                 return float(r[c]) if pd.notna(r[c]) else 0.0
@@ -286,12 +296,12 @@ if df_portfolio is not None:
                             col_shares = "Flatex Shares"
                             col_avg = "Flatex Average Cost"
                         else:
-                            col_invest = f"{broker} Investment"
-                            col_shares = f"{broker} Shares"
-                            col_avg = f"{broker} Average Cost"
-                            for c in [col_invest, col_shares, col_avg]:
-                                if c not in df.columns:
-                                    df[c] = np.nan
+                             col_invest = f"{broker} Investment"
+                             col_shares = f"{broker} Shares"
+                             col_avg = f"{broker} Average Cost"
+                             for c in [col_invest, col_shares, col_avg]:
+                                 if c not in df.columns:
+                                     df[c] = np.nan
 
                         def find_col(exact):
                             if exact in df.columns: return exact
@@ -303,47 +313,109 @@ if df_portfolio is not None:
                         col_shares = find_col(col_shares)
                         col_avg = find_col(col_avg)
 
-                        cur_shares = get_val(df.loc[idx], col_shares)
-                        cur_invest = get_val(df.loc[idx], col_invest)
+                        # --- STRICT SEGREGATED LOGIC (User Formula) ---
                         
-                        txn_invest = shares * price_per_share
-                        
-                        if txn_type == "Buy":
-                            new_shares_broker = cur_shares + shares
-                            new_invest_broker = cur_invest + txn_invest
-                        else: # Sell
-                            new_shares_broker = max(0, cur_shares - shares)
-                            if cur_shares > 0:
-                                ratio = new_shares_broker / cur_shares
-                                new_invest_broker = cur_invest * ratio
-                            else:
-                                new_invest_broker = 0
+                        # Helper for Case-Insensitive Column Lookup
+                        def find_col_ci(df, prompt_name):
+                            for c in df.columns:
+                                if c.strip().lower() == prompt_name.strip().lower():
+                                    return c
+                            return prompt_name # Return prompt if not found (will be created)
 
-                        df.at[idx, col_shares] = new_shares_broker
-                        df.at[idx, col_invest] = new_invest_broker
+                        # Identify Columns (Robust to Casing)
+                        col_invest_eur = find_col_ci(df, "Invested (EUR)")
+                        col_cost_eur = find_col_ci(df, "Share cost (EUR)")
                         
+                        col_invest_usd = find_col_ci(df, "Invested (USD)")
+                        col_cost_usd = find_col_ci(df, "Share Cost (USD)")
+
+                        # 1. Derive Current State (Bucket Model)
+                        # Read existing values
+                        cur_invest_eur = get_val(df.loc[idx], col_invest_eur)
+                        cur_cost_eur = get_val(df.loc[idx], col_cost_eur)
+                        
+                        cur_invest_usd = get_val(df.loc[idx], col_invest_usd)
+                        cur_cost_usd = get_val(df.loc[idx], col_cost_usd)
+                        
+                        # Read Broker Specific Values (Restored)
+                        cur_shares_broker = get_val(df.loc[idx], col_shares)
+                        cur_invest_broker = get_val(df.loc[idx], col_invest)
+                        
+                        # Derive Currency-Specific Shares (User Formula: Invested / Cost)
+                        cur_shares_eur_bucket = cur_invest_eur / cur_cost_eur if cur_cost_eur and cur_invest_eur else 0.0
+                        cur_shares_usd_bucket = cur_invest_usd / cur_cost_usd if cur_cost_usd and cur_invest_usd else 0.0
+
+                        # 2. Calculate Transaction Impacts
+                        # Quote (Shares) from Input
+                        txn_shares = shares 
+                        # Price from Input (in selected currency)
+                        txn_price = price_per_share
+                        
+                        # Deltas
+                        # Shares: Sell (-), Buy (+)
+                        delta_shares = txn_shares if txn_type == "Buy" else -txn_shares
+                        # Invested (Cash Flow): Buy (+), Sell (-) -> shares * price
+                        # Note: User specified: New_Invested = Old - (Shares * Price) for Sell.
+                        # Matches: delta_Value = Shares * Price. Buy adds it, Sell subtracts it.
+                        delta_value = (txn_shares * txn_price) if txn_type == "Buy" else -(txn_shares * txn_price)
+
+                        # 3. Apply to Active Bucket ONLY
+                        if currency == "EUR":
+                            # Update EUR
+                            new_invest_eur = cur_invest_eur + delta_value
+                            new_shares_eur_bucket = max(0, cur_shares_eur_bucket + delta_shares)
+                            
+                            # Recalc EUR Cost
+                            if new_shares_eur_bucket > 0:
+                                new_cost_eur = new_invest_eur / new_shares_eur_bucket
+                            else:
+                                new_cost_eur = 0.0
+                                
+                            # Write changes to DataFrame (EUR)
+                            df.at[idx, col_invest_eur] = new_invest_eur
+                            df.at[idx, col_cost_eur] = new_cost_eur
+                            
+                            # Update Broker (EUR)
+                            new_invest_broker = cur_invest_broker + delta_value
+                            df.at[idx, col_invest] = new_invest_broker
+
+                        else: # USD
+                            # Update USD
+                            new_invest_usd = cur_invest_usd + delta_value
+                            new_shares_usd_bucket = max(0, cur_shares_usd_bucket + delta_shares)
+                            
+                            # Recalc USD Cost
+                            if new_shares_usd_bucket > 0:
+                                new_cost_usd = new_invest_usd / new_shares_usd_bucket
+                            else:
+                                new_cost_usd = 0.0
+                            
+                            # Write changes to DataFrame (USD)
+                            df.at[idx, col_invest_usd] = new_invest_usd
+                            df.at[idx, col_cost_usd] = new_cost_usd
+                            
+                            # Broker (EUR) UNCHANGED
+                            # We do NOT touch col_invest (EUR) for this broker if dealing in USD
+
+                        # 4. Global & Broker Shares Updates (Always)
+                        new_shares_broker = max(0, cur_shares_broker + delta_shares)
+                        df.at[idx, col_shares] = new_shares_broker
+                        
+                        cur_total_shares = get_val(df.loc[idx], "Shares")
+                        new_total_shares = max(0, cur_total_shares + delta_shares)
+                        df.at[idx, "Shares"] = new_total_shares 
+                        
+                        # 5. Broker Average Cost (Legacy - update if we changed broker shares/invest)
+                        # If EUR txn, we updated Invest and Shares.
+                        # If USD txn, we updated Shares, but NOT Invest (EUR). 
+                        # So Broker Avg Cost (EUR) changes in both cases?
+                        # If USD txn: Broker Invest (EUR) static, Shares changed. Avg Cost (EUR) changes.
+                        current_invest_broker_final = get_val(df.loc[idx], col_invest) # Might be new or old
                         if new_shares_broker > 0:
-                            df.at[idx, col_avg] = new_invest_broker / new_shares_broker
+                            df.at[idx, col_avg] = current_invest_broker_final / new_shares_broker
                         else:
                             df.at[idx, col_avg] = 0
 
-                        # 3. Aggregation
-                        tr_shares_c = find_col("TR Shares ")
-                        tr_inv_c = find_col("TR Investment")
-                        fla_shares_c = find_col("Flatex Shares")
-                        fla_inv_c = find_col("Flatex Investment ")
-                        
-                        total_shares = get_val(df.loc[idx], tr_shares_c) + get_val(df.loc[idx], fla_shares_c)
-                        total_invest_eur = get_val(df.loc[idx], tr_inv_c) + get_val(df.loc[idx], fla_inv_c)
-                        
-                        df.at[idx, "Shares"] = total_shares
-                        df.at[idx, "Invested (EUR)"] = total_invest_eur
-                        
-                        if total_shares > 0:
-                            df.at[idx, "Share cost (EUR)"] = total_invest_eur / total_shares
-                        else:
-                            df.at[idx, "Share cost (EUR)"] = 0
-                            
                         df.at[idx, "Last Purchase (YY-MM-DD)"] = txn_date.strftime("%Y-%m-%d")
 
                         # Save
@@ -352,7 +424,7 @@ if df_portfolio is not None:
                         df_portfolio.to_csv(csv_buffer, sep=";", index=False)
                         st.session_state[KEY_DATA] = csv_buffer.getvalue()
                         
-                        st.success(f"Aggiornato {new_ticker}!")
+                        st.success(f"Aggiornato {new_ticker} ({currency})! Logic: {txn_type} {txn_shares} shares.")
                         st.rerun()
                         
                     except Exception as e:
@@ -616,11 +688,11 @@ if df_portfolio is not None:
         
         # --- Update Session State for AI Context ---
         try:
-             # Save this dataframe as CSV string to session state for the Chat Assistant
-             import io
-             buf = io.StringIO()
-             df_invested_capital.to_csv(buf, index=False)
-             st.session_state['portfolio_analyzed_csv'] = buf.getvalue()
+            # Save this dataframe as CSV string to session state for the Chat Assistant
+            import io
+            buf = io.StringIO()
+            df_invested_capital.to_csv(buf, index=False)
+            st.session_state['portfolio_analyzed_csv'] = buf.getvalue()
         except Exception as e:
              print(f"Error caching portfolio for AI: {e}")
         
