@@ -1,9 +1,0 @@
-pandas
-numpy
-streamlit
-plotly
-yfinance
-requests
-scipy
-toml
-python-dotenv

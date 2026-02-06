@@ -1,9 +1,0 @@
-streamlit
-llama-index
-llama-index-core
-llama-index-llms-openai
-llama-index-llms-anthropic
-openai
-anthropic
-dotenv
-requests
