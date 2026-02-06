@@ -15,7 +15,11 @@ load_dotenv()
 # Import AI Provider
 # Add submodule path to sys.path for Deployment (Streamlit Cloud)
 try:
-    sys.path.append(os.path.join(os.path.dirname(__file__), "custom_agents"))
+    submodule_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "custom_agents")
+    )
+    if submodule_path not in sys.path:
+        sys.path.insert(0, submodule_path)
 except Exception:
     pass
 
