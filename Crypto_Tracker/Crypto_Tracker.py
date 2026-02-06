@@ -2,6 +2,7 @@
 
 Questo dashboard permette di analizzare e visualizzare il tuo portafoglio Crypto Bitpanda con strategie DCA.
 """
+
 import base64
 import os
 import io
@@ -21,7 +22,11 @@ except ImportError as e:
     AIProvider = None
 
 from agents.cloud_ui import render_cloud_ui
-from modules.collect_data_utils import collect_bitpanda_data, sort_data_by_asset, load_portfolio_snapshot
+from modules.collect_data_utils import (
+    collect_bitpanda_data,
+    sort_data_by_asset,
+    load_portfolio_snapshot,
+)
 from modules.portfolio_utils import aggregate_portfolio, filter_crypto_df
 from modules.yahoo_utils import portfolio_history
 from modules.price_utils import get_bitpanda_prices, calculate_gain_loss
@@ -36,15 +41,20 @@ st.caption(
 st.sidebar.header("🤖 Configurazione AI")
 with st.sidebar.expander("Settings AI", expanded=False):
     provider_type = st.selectbox("Provider", ["Gemini", "Ollama"], index=0)
-    
+
     api_key = None
     model_name = None
-    
+
     if provider_type == "Gemini":
         # Recupera API Key da Env o Input
         env_key = os.getenv("GOOGLE_API_KEY")
-        api_key = st.text_input("Gemini API Key", value=env_key if env_key else "", type="password", help="Se presente nel file .env verra' caricata automaticamente")
-        
+        api_key = st.text_input(
+            "Gemini API Key",
+            value=env_key if env_key else "",
+            type="password",
+            help="Se presente nel file .env verra' caricata automaticamente",
+        )
+
         # Recupera lista modelli da AIProvider (se disponibile)
         gemini_models = AIProvider.FALLBACK_ORDER if AIProvider else ["gemini-pro"]
         model_name = st.selectbox("Modello", gemini_models, index=0)
@@ -62,10 +72,8 @@ with st.sidebar.expander("Settings AI", expanded=False):
     if st.button("Applica Configurazione AI"):
         if AIProvider:
             try:
-                st.session_state['ai_provider'] = AIProvider(
-                    api_key=api_key, 
-                    provider_type=provider_type, 
-                    model_name=model_name
+                st.session_state["ai_provider"] = AIProvider(
+                    api_key=api_key, provider_type=provider_type, model_name=model_name
                 )
                 st.toast(f"AI Attivata: {provider_type} ({model_name})", icon="🟢")
             except Exception as e:
@@ -83,7 +91,9 @@ uploaded_file = st.sidebar.file_uploader(
 
 # --- Cloud Sync Section ---
 # --- Cloud Sync Section ---
-LOCAL_DATA_FILE = "Crypto_Portfolio_csv.csv" # Still referenced but maybe unused if in-memory
+LOCAL_DATA_FILE = (
+    "Crypto_Portfolio_csv.csv"  # Still referenced but maybe unused if in-memory
+)
 render_cloud_ui(is_sidebar=True)
 
 crypto_df = None
@@ -108,19 +118,19 @@ if uploaded_file is not None:
     grouped = aggregate_portfolio(df)
     crypto_df = grouped
 
-elif 'cloud_data' in st.session_state and st.session_state['cloud_data']:
+elif "cloud_data" in st.session_state and st.session_state["cloud_data"]:
     st.sidebar.success("Uso dati da Cloud (In-Memory)")
     # Snapshot Logic - from buffer
-    raw_data = st.session_state['cloud_data']
+    raw_data = st.session_state["cloud_data"]
     if isinstance(raw_data, bytes):
         raw_data = io.BytesIO(raw_data)
     else:
         raw_data = io.StringIO(raw_data)
-        
+
     crypto_df = load_portfolio_snapshot(raw_data)
 
 elif os.path.exists(LOCAL_DATA_FILE):
-    # Fallback: if local file still exists (maybe from manual save), use it but warn? 
+    # Fallback: if local file still exists (maybe from manual save), use it but warn?
     # Or just ignore it as per user request "NON deve essere scaricato".
     # User said "NON deve essere scaricato", but maybe it exists from previous runs.
     # We should prioritize cloud_data. If cloud_data is missing, we could try to load local if exists,
@@ -137,21 +147,22 @@ if crypto_df is not None and not crypto_df.empty:
         crypto_df,
         column_config={
             "amount_asset_collect": st.column_config.NumberColumn(
-                "Shares (Quantità)",
-                format="%.8f"
+                "Shares (Quantità)", format="%.8f"
             ),
             "median_price": st.column_config.NumberColumn(
-                "DCA Price (Prezzo Medio)",
-                format="%.8f"
+                "DCA Price (Prezzo Medio)", format="%.8f"
             ),
             "amount_fiat_collect": st.column_config.NumberColumn(
-                "Invested (EUR)",
-                format="%.2f"
+                "Invested (EUR)", format="%.2f"
             ),
-            "date_last_update_buy": st.column_config.TextColumn("Last Update (Buy/Sell)"),
-            "date_last_update_staking": st.column_config.TextColumn("Last Update (Staking)")
+            "date_last_update_buy": st.column_config.TextColumn(
+                "Last Update (Buy/Sell)"
+            ),
+            "date_last_update_staking": st.column_config.TextColumn(
+                "Last Update (Staking)"
+            ),
         },
-        width="stretch"
+        width="stretch",
     )
     st.markdown("---")
     st.markdown("### Visualizzazione Grafica")
@@ -205,10 +216,10 @@ if crypto_df is not None and not crypto_df.empty:
         st.info("Storico non disponibile per uno o più asset.")
     # Download CSV aggregato
     csv = crypto_df.to_csv(index=False)
-    
+
     # Save context for AI
-    st.session_state['crypto_analyzed_csv'] = csv
-    
+    st.session_state["crypto_analyzed_csv"] = csv
+
     b64 = base64.b64encode(csv.encode()).decode()
     st.download_button(
         label="Scarica CSV aggregato",
@@ -217,92 +228,104 @@ if crypto_df is not None and not crypto_df.empty:
         mime="text/csv",
     )
 else:
-    st.info(
-        "Carica un file CSV per iniziare l'analisi del portafoglio crypto."
-    )
+    st.info("Carica un file CSV per iniziare l'analisi del portafoglio crypto.")
 
 # --- SIDEBAR: CHAT ASSISTANT ---
 st.sidebar.divider()
 st.sidebar.header("💬 Chat Assistant")
 
-if 'ai_provider' in st.session_state and st.session_state['ai_provider']:
+if "ai_provider" in st.session_state and st.session_state["ai_provider"]:
     # Init chat history
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    
+
     # Show chat
     with st.sidebar.expander("Conversazione", expanded=True):
         if st.button("🗑️ Pulisci Chat"):
             st.session_state.chat_history = []
             st.rerun()
-            
+
         for msg in st.session_state.chat_history:
-             with st.chat_message(msg["role"]):
+            with st.chat_message(msg["role"]):
                 st.write(msg["content"])
-        
+
         # Files Uploader
         uploaded_files = st.sidebar.file_uploader(
-            "Allega file (Immagini/PDF)", 
-            type=['png', 'jpg', 'jpeg', 'pdf'], 
+            "Allega file (Immagini/PDF)",
+            type=["png", "jpg", "jpeg", "pdf"],
             accept_multiple_files=True,
-            key="chat_file_uploader_crypto"
+            key="chat_file_uploader_crypto",
         )
-        
-        if user_prompt := st.chat_input("Chiedi al Crypto Advisor...", key="sidebar_chat_input_crypto"):
+
+        if user_prompt := st.chat_input(
+            "Chiedi al Crypto Advisor...", key="sidebar_chat_input_crypto"
+        ):
             # Prepare message content
             display_msg = user_prompt
             if uploaded_files:
                 display_msg += f"\n\n📎 *{len(uploaded_files)} file allegati*"
 
-            st.session_state.chat_history.append({"role": "user", "content": display_msg})
+            st.session_state.chat_history.append(
+                {"role": "user", "content": display_msg}
+            )
             with st.chat_message("user"):
                 st.write(display_msg)
-            
+
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     try:
                         # --- CONTEXT PREPARATION ---
                         system_msg = "Sei un esperto di criptovalute e investimenti."
-                        
-                        KEY_ANALYZED = 'crypto_analyzed_csv'
-                        
+
+                        KEY_ANALYZED = "crypto_analyzed_csv"
+
                         data_context_str = ""
-                        
-                        if KEY_ANALYZED in st.session_state and st.session_state[KEY_ANALYZED]:
-                             data_context_str = st.session_state[KEY_ANALYZED]
-                             system_msg += "\n\nAnalizza il seguente portafoglio Crypto aggregato:\n"
-                        
+
+                        if (
+                            KEY_ANALYZED in st.session_state
+                            and st.session_state[KEY_ANALYZED]
+                        ):
+                            data_context_str = st.session_state[KEY_ANALYZED]
+                            system_msg += "\n\nAnalizza il seguente portafoglio Crypto aggregato:\n"
+
                         if data_context_str:
-                             system_msg += f"""
+                            system_msg += f"""
                              {data_context_str}
                              
                              Rispondi alle domande dell'utente basandoti su questi dati.
                              Sii preciso e conciso. Rispondi in italiano.
                              """
                         else:
-                             system_msg += " Non hai accesso ai dati del portafoglio al momento. Rispondi genericamente."
+                            system_msg += " Non hai accesso ai dati del portafoglio al momento. Rispondi genericamente."
 
-                        final_prompt_text = f"{system_msg}\n\nDOMANDA UTENTE: {user_prompt}"
-                        
+                        final_prompt_text = (
+                            f"{system_msg}\n\nDOMANDA UTENTE: {user_prompt}"
+                        )
+
                         # Construct Prompt (List if files present)
                         final_prompt = [final_prompt_text]
-                        
+
                         if uploaded_files:
                             for uploaded_file in uploaded_files:
                                 bytes_data = uploaded_file.getvalue()
                                 mime_type = uploaded_file.type
-                                final_prompt.append({
-                                    "mime_type": mime_type,
-                                    "data": bytes_data
-                                })
+                                final_prompt.append(
+                                    {"mime_type": mime_type, "data": bytes_data}
+                                )
 
                         # If only text, pass string (cleaner debug)
                         if len(final_prompt) == 1:
                             final_prompt = final_prompt[0]
-                        
-                        stream = st.session_state['ai_provider'].get_model().generate_stream(final_prompt)
+
+                        stream = (
+                            st.session_state["ai_provider"]
+                            .get_model()
+                            .generate_stream(final_prompt)
+                        )
                         response = st.write_stream(stream)
-                        st.session_state.chat_history.append({"role": "assistant", "content": response})
+                        st.session_state.chat_history.append(
+                            {"role": "assistant", "content": response}
+                        )
                     except Exception as e:
                         st.error(f"Errore: {e}")
 else:
