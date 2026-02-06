@@ -1,0 +1,9 @@
+[submodule "Budget_App/custom_agents"]
+	path = Budget_App/custom_agents
+	url = https://github.com/giuseppedavidde/Custom_Agents.git
+[submodule "Crypto_Tracker/custom_agents"]
+	path = Crypto_Tracker/custom_agents
+	url = https://github.com/giuseppedavidde/Custom_Agents.git
+[submodule "Portfolio_Reader/custom_agents"]
+	path = Portfolio_Reader/custom_agents
+	url = https://github.com/giuseppedavidde/Custom_Agents.git
