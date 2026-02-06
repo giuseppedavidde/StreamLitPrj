@@ -3,6 +3,7 @@ pandas
 plotly
 ollama
 google-genai
+google-api-core
 beautifulsoup4
 requests
 python-dotenv

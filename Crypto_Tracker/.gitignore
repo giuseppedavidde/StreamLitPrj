@@ -7,3 +7,5 @@ verif*
 check_*.py
 tests_*
 *pycache*
+agents_backup/*
+agents/*

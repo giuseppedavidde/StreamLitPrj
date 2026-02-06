@@ -5,3 +5,5 @@ FIR_Filter/*
 .env
 agents/__pycache__/*.pyc
 *pycache*
+agents_backup/*
+agents/*
