@@ -15,13 +15,6 @@ import streamlit as st
 
 # Load environment variables
 load_dotenv()
-import sys
-
-# Add submodule path to sys.path for Deployment (Streamlit Cloud)
-try:
-    sys.path.append(os.path.join(os.path.dirname(__file__), "custom_agents"))
-except Exception:
-    pass
 
 try:
     from agents.ai_provider import AIProvider

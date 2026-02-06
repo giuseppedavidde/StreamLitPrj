@@ -9,3 +9,4 @@ PyGithub
 python-dotenv
 ollama
 beautifulsoup4
+git+https://github.com/giuseppedavidde/Custom_Agents.git#egg=custom_agents
