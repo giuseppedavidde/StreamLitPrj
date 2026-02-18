@@ -1,0 +1,9 @@
+streamlit
+ib_insync
+pandas_ta
+plotly
+python-dotenv
+watchdog
+# Install the local Custom_Agents package in editable mode
+git+https://github.com/giuseppedavidde/Custom_Agents.git#egg=custom_agents
+#-e ../../Custom_Agents
