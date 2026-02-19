@@ -2,9 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import traceback
+import os
 
 from ibkr_connector import IBKRConnector
 from technical_analysis import add_indicators, detect_patterns
+from option_utils import compute_greeks_table, historical_volatility
 
 # Load .env (GOOGLE_API_KEY etc.) before importing agents
 from dotenv import load_dotenv
@@ -193,10 +195,13 @@ ISTRUZIONI:
 
     try:
         agent = TraderAgent(provider_type=provider_type, model_name=model_name)
+        actual_model = agent.ai.current_model_name
+        print(f"🤖 Chat using: {provider_type} / {actual_model}")
         response = agent.ai.get_model().generate_content(prompt)
-        return response.text
+        model_badge = f"*🤖 Model: `{provider_type}` / `{actual_model}`*\n\n---\n\n"
+        return model_badge + response.text
     except Exception as e:
-        return f"❌ AI Error: {e}"
+        return f"❌ AI Error ({provider_type}/{model_name}): {e}"
 
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -242,9 +247,11 @@ if TraderAgent and AIProvider:
     st.sidebar.title("AI Model")
     ai_provider = st.sidebar.selectbox(
         "Provider",
-        ["gemini", "ollama"],
+        ["gemini", "ollama", "groq"],
         format_func=lambda x: (
-            "☁️ Gemini (Cloud)" if x == "gemini" else "🖥️ Ollama (Local)"
+            "☁️ Gemini (Cloud)"
+            if x == "gemini"
+            else "🖥️ Ollama (Local)" if x == "ollama" else "⚡ Groq (LPU Cloud)"
         ),
     )
     st.session_state.ai_provider = ai_provider
@@ -257,6 +264,35 @@ if TraderAgent and AIProvider:
         else:
             st.sidebar.warning("No Ollama models found. Is Ollama running?")
             st.session_state.ai_model_name = None
+    elif ai_provider == "groq":
+        # Groq specific verification
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            api_key = st.sidebar.text_input("Groq API Key", type="password")
+            if api_key:
+                os.environ["GROQ_API_KEY"] = api_key
+
+        if not os.getenv("GROQ_API_KEY"):
+            st.sidebar.warning("🔑 Groq API Key required.")
+            st.session_state.ai_model_name = None
+        else:
+            try:
+                # Fetch models dynamically using the confirmed key
+                groq_models = AIProvider.get_groq_models(
+                    api_key=os.getenv("GROQ_API_KEY")
+                )
+            except Exception as e:
+                st.sidebar.error(f"Debug Info: {e}")
+                print(f"Error fetching Groq models: {e}")
+                groq_models = []
+
+            if not groq_models:
+                st.sidebar.error("❌ Could not fetch Groq models. Check API Key.")
+                st.session_state.ai_model_name = None
+            else:
+                st.session_state.ai_model_name = st.sidebar.selectbox(
+                    "Model", groq_models
+                )
     else:
         # For Gemini, let AIProvider auto-select the best model
         st.session_state.ai_model_name = None
@@ -266,6 +302,15 @@ if TraderAgent and AIProvider:
             st.sidebar.caption(f"Auto: **{_temp.current_model_name}**")
         except Exception:
             st.sidebar.caption("Gemini (auto-select)")
+
+# EMA Colors
+if TraderAgent and AIProvider:
+    with st.sidebar.expander("🎨 EMA Colors", expanded=False):
+        ema20_color = st.color_picker("EMA 20", "#00BFFF", key="ema20_color")
+        ema50_color = st.color_picker("EMA 50", "#FFD700", key="ema50_color")
+        ema200_color = st.color_picker("EMA 200", "#FF1493", key="ema200_color")
+else:
+    ema20_color, ema50_color, ema200_color = "#00BFFF", "#FFD700", "#FF1493"
 
 # ─── Main Area ──────────────────────────────────────────────────────────────
 
@@ -317,15 +362,216 @@ if sec_type == "OPT":
             and "opt_exps" in st.session_state
         ):
             st.subheader("📋 Option Contract")
+
+            available_exps = st.session_state["opt_exps"]
+            available_strikes = st.session_state["opt_strikes"]
+
+            # ── AI Strategy Suggestion ──────────────────────────────
+            if TraderAgent and AIProvider:
+                ai_col1, ai_col2 = st.columns([1, 3])
+                with ai_col1:
+                    time_horizon = st.radio(
+                        "⏱️ Horizon",
+                        ["weekly", "monthly", "quarterly"],
+                        index=1,
+                        format_func=lambda x: {
+                            "weekly": "📅 Weekly",
+                            "monthly": "📆 Monthly",
+                            "quarterly": "📊 Quarterly",
+                        }[x],
+                        horizontal=True,
+                    )
+                with ai_col2:
+                    suggest_clicked = st.button(
+                        "🤖 AI Suggest Strategy",
+                        use_container_width=True,
+                    )
+
+                if suggest_clicked:
+                    provider_type = st.session_state.get("ai_provider", "gemini")
+                    model_name = st.session_state.get("ai_model_name")
+
+                    with st.spinner(
+                        "📊 Fetching data, computing Black-Scholes Greeks, querying AI..."
+                    ):
+                        try:
+                            und_df = st.session_state.connector.get_historical_data(
+                                ticker,
+                                sec_type="STK",
+                                duration="1 M",
+                                bar_size_setting="1 hour",
+                            )
+                            if und_df is not None and not und_df.empty:
+                                und_df = add_indicators(und_df)
+                                und_analysis = detect_patterns(und_df)
+                                price = und_analysis.get("current_price", 0)
+
+                                # Compute real historical volatility
+                                hv = und_analysis.get(
+                                    "hist_volatility",
+                                    historical_volatility(und_df),
+                                )
+
+                                # Filter strikes near ATM for Greeks computation
+                                atm_range = price * 0.10
+                                nearby_strikes = sorted(
+                                    [
+                                        s
+                                        for s in available_strikes
+                                        if abs(s - price) <= atm_range
+                                    ]
+                                )
+                                if len(nearby_strikes) < 4:
+                                    nearby_strikes = sorted(available_strikes[:20])
+
+                                # Filter expirations by horizon
+                                horizon_map = {
+                                    "weekly": 1,
+                                    "monthly": 2,
+                                    "quarterly": 4,
+                                }
+                                max_exps = horizon_map.get(time_horizon, 2)
+                                limited_exps = available_exps[:max_exps]
+
+                                # Compute Black-Scholes Greeks for all strike x expiry combos
+                                greeks_table = []
+                                for exp in limited_exps:
+                                    exp_greeks = compute_greeks_table(
+                                        underlying_price=price,
+                                        strikes=nearby_strikes,
+                                        expiry_str=exp,
+                                        hist_vol=hv,
+                                    )
+                                    greeks_table.extend(exp_greeks)
+
+                                agent = TraderAgent(
+                                    provider_type=provider_type,
+                                    model_name=model_name,
+                                )
+                                strategies = agent.suggest_option_strategy(
+                                    ticker=ticker,
+                                    analysis=und_analysis,
+                                    expirations=available_exps,
+                                    strikes=available_strikes,
+                                    underlying_price=price,
+                                    time_horizon=time_horizon,
+                                    greeks_table=greeks_table,
+                                )
+                                st.session_state["ai_strategies"] = strategies
+                                st.session_state["ai_strategies_model"] = (
+                                    f"{provider_type}/{agent.ai.current_model_name}"
+                                )
+                            else:
+                                st.warning(
+                                    "Could not fetch underlying data for analysis."
+                                )
+                        except Exception as e:
+                            st.error(f"❌ AI Strategy Error: {e}")
+                            print(f"[ERROR] AI Strategy: {type(e).__name__}: {e}")
+                            traceback.print_exc()
+
+                # Display strategy cards if available
+                if (
+                    "ai_strategies" in st.session_state
+                    and st.session_state["ai_strategies"]
+                ):
+                    strategies = st.session_state["ai_strategies"]
+                    model_used = st.session_state.get("ai_strategies_model", "")
+                    st.caption(f"*🤖 Suggested by `{model_used}`*")
+
+                    for i, strat in enumerate(strategies):
+                        prob = strat.get("probability", 50)
+                        dir_icon = {
+                            "BULLISH": "🟢",
+                            "BEARISH": "🔴",
+                            "NEUTRAL": "🟡",
+                        }.get(strat.get("direction", "NEUTRAL"), "⚪")
+                        prob_bar = "🟢" if prob >= 60 else "🟡" if prob >= 45 else "🔴"
+
+                        with st.expander(
+                            f"{dir_icon} **{strat['name']}** — {strat.get('direction', 'NEUTRAL')} — {prob_bar} {prob}%",
+                            expanded=(i == 0),
+                        ):
+                            # Legs table with REAL Greeks
+                            st.markdown("**📋 Operazioni da eseguire:**")
+                            for j, leg in enumerate(strat.get("legs", []), 1):
+                                action_icon = (
+                                    "🟢 BUY" if leg["action"] == "BUY" else "🔴 SELL"
+                                )
+                                right_label = "Call" if leg["right"] == "C" else "Put"
+                                qty = leg.get("quantity", 1)
+                                strike_str = f"**{leg['strike']}**"
+                                if leg.get("strike_corrected"):
+                                    strike_str += " ⚠️"
+                                exp_str = f"`{leg['expiry']}`"
+                                if leg.get("expiry_corrected"):
+                                    exp_str += " ⚠️"
+                                leg_text = (
+                                    f"**Leg {j}:** {action_icon} **{qty}x {right_label}** "
+                                    f"Strike {strike_str} — Exp {exp_str}"
+                                )
+                                # Show real calculated Greeks if available
+                                g = leg.get("greeks")
+                                if g:
+                                    leg_text += (
+                                        f"  \n"
+                                        f"  _Δ={g['delta']:+.3f}  "
+                                        f"Γ={g['gamma']:.4f}  "
+                                        f"Θ={g['theta']:+.4f}/day  "
+                                        f"ν={g['vega']:.4f}  "
+                                        f"Price=${g['price']:.2f}_"
+                                    )
+                                st.markdown(leg_text)
+
+                            # P/L summary
+                            st.markdown(
+                                f"\n💰 **Max Profit:** {strat.get('max_profit', 'N/A')} · "
+                                f"💸 **Max Loss:** {strat.get('max_loss', 'N/A')} · "
+                                f"⚖️ **Breakeven:** {strat.get('breakeven', 'N/A')}"
+                            )
+
+                            # AI Rationale (should cite real indicator values)
+                            rationale = strat.get("rationale", "")
+                            if rationale:
+                                st.info(f"💡 {rationale}")
+
+                    st.markdown("---")
+
+            # ── Manual Selectors (with AI pre-fill) ─────────────────
+            # Determine default indices from AI selection or fallback
+            default_exp_idx = 0
+            default_strike_idx = 0
+            default_right_idx = 0
+
+            if "opt_selected_expiry" in st.session_state:
+                sel_exp = st.session_state["opt_selected_expiry"]
+                if sel_exp in available_exps:
+                    default_exp_idx = available_exps.index(sel_exp)
+
+            if "opt_selected_strike" in st.session_state:
+                sel_strike = st.session_state["opt_selected_strike"]
+                if sel_strike in available_strikes:
+                    default_strike_idx = available_strikes.index(sel_strike)
+
+            if "opt_selected_right" in st.session_state:
+                default_right_idx = (
+                    0 if st.session_state["opt_selected_right"] == "C" else 1
+                )
+
             c1, c2, c3 = st.columns(3)
             with c1:
-                expiry = st.selectbox("Expiry Date", st.session_state["opt_exps"])
+                expiry = st.selectbox(
+                    "Expiry Date", available_exps, index=default_exp_idx
+                )
             with c2:
-                strike = st.selectbox("Strike Price", st.session_state["opt_strikes"])
+                strike = st.selectbox(
+                    "Strike Price", available_strikes, index=default_strike_idx
+                )
             with c3:
                 right = st.selectbox(
                     "Right",
                     ["C", "P"],
+                    index=default_right_idx,
                     format_func=lambda x: "📈 Call" if x == "C" else "📉 Put",
                 )
 
@@ -432,7 +678,7 @@ if "market_df" in st.session_state:
                         y=und_df["EMA_20"],
                         mode="lines",
                         name="EMA 20",
-                        line=dict(color="blue", width=1),
+                        line=dict(color=ema20_color, width=2),
                     )
                 )
             if "EMA_50" in und_df.columns:
@@ -442,7 +688,17 @@ if "market_df" in st.session_state:
                         y=und_df["EMA_50"],
                         mode="lines",
                         name="EMA 50",
-                        line=dict(color="orange", width=1),
+                        line=dict(color=ema50_color, width=2),
+                    )
+                )
+            if "EMA_200" in und_df.columns:
+                fig_und.add_trace(
+                    go.Scatter(
+                        x=und_df.index,
+                        y=und_df["EMA_200"],
+                        mode="lines",
+                        name="EMA 200",
+                        line=dict(color=ema200_color, width=2, dash="dash"),
                     )
                 )
             fig_und.update_layout(
@@ -492,7 +748,7 @@ if "market_df" in st.session_state:
                     y=df["EMA_20"],
                     mode="lines",
                     name="EMA 20",
-                    line=dict(color="blue", width=1),
+                    line=dict(color=ema20_color, width=2),
                 )
             )
         if "EMA_50" in df.columns:
@@ -502,7 +758,17 @@ if "market_df" in st.session_state:
                     y=df["EMA_50"],
                     mode="lines",
                     name="EMA 50",
-                    line=dict(color="orange", width=1),
+                    line=dict(color=ema50_color, width=2),
+                )
+            )
+        if "EMA_200" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["EMA_200"],
+                    mode="lines",
+                    name="EMA 200",
+                    line=dict(color=ema200_color, width=2, dash="dash"),
                 )
             )
         fig.update_layout(
