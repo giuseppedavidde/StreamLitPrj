@@ -808,12 +808,15 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
                 st.write(f"**VWAP:** ${vwap_val:.2f}")
                 st.write(f"**RSI(14):** {rsi_val:.1f}")
                 st.write(f"**Vol:** {vol_val:,.0f}")
-                if "greeks" in meta and meta["greeks"]:
-                    st.caption(
-                        f"Δ: {meta['greeks'].get('delta', 0):.2f} | Θ: {meta['greeks'].get('theta', 0):.3f}"
-                    )
+            elif "greeks" in meta and "price" in meta["greeks"]:
+                st.metric("Price", f"${meta['greeks']['price']:.2f}")
             else:
                 st.warning("Data unavailable.")
+
+            if "greeks" in meta and meta["greeks"]:
+                st.caption(
+                    f"Δ: {meta['greeks'].get('delta', 0):.2f} | Θ: {meta['greeks'].get('theta', 0):.3f}"
+                )
 
     st.markdown("---")
 
@@ -952,6 +955,202 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
         margin=dict(l=20, r=20, t=30, b=20),
     )
     st.plotly_chart(fig_pl, width="stretch")
+
+    # ─── Manual Strategy Builder ─────────────────────────────────────────────
+    with st.expander("🛠️ Manual Strategy Builder (Tweak Current)", expanded=False):
+        st.markdown(
+            "Modify the loaded strategy legs. Click **Recalculate & Plot** to update the chart."
+        )
+
+        # We need a form or keys for each leg
+        new_legs = []
+
+        # Header row
+        h1, h2, h3, h4, h5 = st.columns(5)
+        h1.write("**Action**")
+        h2.write("**Quantity**")
+        h3.write("**Strike**")
+        h4.write("**Right**")
+        h5.write("**Expiry (YYYYMMDD)**")
+
+        for i, leg_bundle in enumerate(leg_data_list):
+            meta = leg_bundle["meta"]
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                action = st.selectbox(
+                    f"Action_{i}",
+                    ["BUY", "SELL"],
+                    index=0 if meta["action"].upper() == "BUY" else 1,
+                    label_visibility="collapsed",
+                )
+            with c2:
+                qty = st.number_input(
+                    f"Qty_{i}",
+                    min_value=1,
+                    value=int(meta["quantity"]),
+                    label_visibility="collapsed",
+                )
+            with c3:
+                strike = st.number_input(
+                    f"Strike_{i}",
+                    value=float(meta["strike"]),
+                    step=0.5,
+                    format="%.2f",
+                    label_visibility="collapsed",
+                )
+            with c4:
+                right = st.selectbox(
+                    f"Right_{i}",
+                    ["C", "P"],
+                    index=0 if meta["right"].upper() == "C" else 1,
+                    label_visibility="collapsed",
+                )
+            with c5:
+                expiry = st.text_input(
+                    f"Expiry_{i}",
+                    value=meta.get("expiry", ""),
+                    label_visibility="collapsed",
+                )
+
+            new_legs.append(
+                {
+                    "action": action,
+                    "quantity": qty,
+                    "strike": strike,
+                    "right": right,
+                    "expiry": expiry,
+                }
+            )
+
+        if st.button("🔄 Recalculate & Plot", width="stretch"):
+            from option_utils import compute_greeks_table
+
+            # Recalculate the entire greeks table locally based on the tweaker
+            # We assume we have the original underlying price and IV
+            recalculated_strategy = dict(strat_meta)  # copy previous keys like iv_used
+            recalculated_strategy["name"] = (
+                f"Custom Tweaked: {strat_meta.get('name', '')}"
+            )
+
+            # Recompute greeks per leg using Black-Scholes function via compute_greeks_table
+            # Need to create fresh 'strategy_legs_data' based on this
+            new_leg_data_list = []
+            for n_leg in new_legs:
+                # We do a tiny greeks request just for this strike
+                g_table = compute_greeks_table(
+                    und_price, [n_leg["strike"]], n_leg["expiry"], iv, 0.05
+                )
+                if g_table:
+                    # g_table[0] has 'call' and 'put'. Pick the correct one.
+                    g_leg = (
+                        g_table[0]["call"]
+                        if n_leg["right"] == "C"
+                        else g_table[0]["put"]
+                    )
+                    # Build dummy meta bundle
+                    new_meta = {
+                        "name": f"Leg {n_leg['strike']} {n_leg['right']}",
+                        "action": n_leg["action"],
+                        "quantity": n_leg["quantity"],
+                        "strike": n_leg["strike"],
+                        "right": n_leg["right"],
+                        "expiry": n_leg["expiry"],
+                        "greeks": g_leg,
+                    }
+                    new_leg_data_list.append(
+                        {"meta": new_meta, "df": None}
+                    )  # Can't reliably refetch df here synchronously
+
+            st.session_state["selected_strategy"] = recalculated_strategy
+            st.session_state["strategy_legs_data"] = new_leg_data_list
+            st.rerun()
+
+    # ─── Strategy AI Chat ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🤖 Strategy Chat Analyst")
+
+    if "strategy_chat" not in st.session_state:
+        st.session_state.strategy_chat = []
+
+    if not TraderAgent:
+        st.info("AI Agent not available (agents module not found).")
+    else:
+        # Calculate summary metrics to feed the AI
+        max_profit = float(np.max(net_pl))
+        max_loss = float(np.min(net_pl))
+
+        # Determine Breakevens
+        # Find points where net_pl crosses 0
+        signs = np.sign(net_pl)
+        signs[signs == 0] = -1
+        crossings = np.where(np.diff(signs))[0]
+        breakevens = [prices[idx] for idx in crossings]
+
+        # Build Positions String gracefully
+        pos_list = []
+        if new_legs:
+            pos_list = [
+                f"{l['quantity']}x {l['action']} {l['strike']}{l['right']}"
+                for l in new_legs
+            ]
+        else:
+            pos_list = [
+                f"{leg['meta'].get('quantity')}x {leg['meta'].get('action')} {leg['meta'].get('strike')}{leg['meta'].get('right')}"
+                for leg in leg_data_list
+            ]
+        positions_str = ", ".join(pos_list)
+
+        # Construct Hidden Context
+        hidden_context = (
+            f"STRATEGY CONTEXT TO ASSIST USER:\n"
+            f"Underlying: {strat_meta.get('ticker','')} at ${und_price:.2f}\n"
+            f"IV Assumed: {iv*100:.1f}%\n"
+            f"Positions: {positions_str}\n"
+            f"Calculated Max Profit at Expiration: ${max_profit:.2f}\n"
+            f"Calculated Max Loss at Expiration: ${max_loss:.2f}\n"
+            f"Breakeven Price(s): {[round(be, 2) for be in breakevens]}\n"
+        )
+
+        # Render chat history
+        for msg in st.session_state.strategy_chat:
+            if msg["role"] != "system":  # Don't show hidden contexts
+                with st.chat_message(
+                    msg["role"], avatar="🤖" if msg["role"] == "assistant" else "👤"
+                ):
+                    st.markdown(msg["content"])
+
+        if strat_user_input := st.chat_input(
+            "Ask about this P/L profile or how to adjust it..."
+        ):
+            st.session_state.strategy_chat.append(
+                {"role": "user", "content": strat_user_input}
+            )
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(strat_user_input)
+
+            with st.spinner("🤖 Analyzing the generated strategy..."):
+                try:
+                    # Provide system state and short user query to underlying _chat_with_ai or general AI
+                    # Reusing the singleton TraderAgent to get raw text
+                    agent = TraderAgent(
+                        provider_type=st.session_state.get("ai_provider", "gemini"),
+                        model_name=st.session_state.get(
+                            "ai_model_name", "gemini-flash-latest"
+                        ),
+                    )
+                    prompt = f"Sei un Quantitative Options Analyst. Rispondi in italiano.\n\n{hidden_context}\n\nUser Question: {strat_user_input}"
+
+                    response = agent.ai.get_model().generate_content(prompt)
+                    ai_text = response.text
+
+                    st.session_state.strategy_chat.append(
+                        {"role": "assistant", "content": ai_text}
+                    )
+                    with st.chat_message("assistant", avatar="🤖"):
+                        st.markdown(ai_text)
+                except Exception as e:
+                    st.error(f"Strategy AI Error: {e}")
 
 elif "market_df" in st.session_state:
     df = st.session_state.market_df
