@@ -6,7 +6,12 @@ import os
 
 from ibkr_connector import IBKRConnector
 from technical_analysis import add_indicators, detect_patterns
-from option_utils import compute_greeks_table, historical_volatility
+from option_utils import (
+    compute_greeks_table,
+    historical_volatility,
+    vectorized_black_scholes,
+    days_to_expiry,
+)
 
 # Load .env (GOOGLE_API_KEY etc.) before importing agents
 from dotenv import load_dotenv
@@ -167,7 +172,11 @@ def _chat_with_ai(user_message: str, uploaded_files=None) -> str:
         role = "User" if msg["role"] == "user" else "Analyst"
         history_text += f"\n{role}: {msg['content']}\n"
 
+    import datetime
+
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
     text_prompt = f"""Sei un trader esperto e analista quantitativo.
+Oggi è il {today_str}.
 Hai accesso ai seguenti dati di mercato REALI per {ticker} ({timeframe}):
 
 {context}
@@ -213,7 +222,7 @@ client_id = st.sidebar.number_input("Client ID", value=1, step=1)
 
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    if st.button("Connect", use_container_width=True):
+    if st.button("Connect", width="stretch"):
         try:
             st.session_state.connector.connect(host, port, client_id)
             st.session_state.pop("opt_cache_key", None)
@@ -223,7 +232,7 @@ with col1:
             traceback.print_exc()
             st.error(f"Connection Failed: {e}")
 with col2:
-    if st.button("Disconnect", use_container_width=True):
+    if st.button("Disconnect", width="stretch"):
         st.session_state.connector.disconnect()
         for k in ["opt_exps", "opt_strikes", "opt_cache_key"]:
             st.session_state.pop(k, None)
@@ -384,7 +393,7 @@ if sec_type == "OPT":
                 with ai_col2:
                     suggest_clicked = st.button(
                         "🤖 AI Suggest Strategy",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 if suggest_clicked:
@@ -395,22 +404,31 @@ if sec_type == "OPT":
                         "📊 Fetching data, computing Black-Scholes Greeks, querying AI..."
                     ):
                         try:
+                            # Fetch daily data for 1 Year specifically for accurate Historical Volatility (HV)
                             und_df = st.session_state.connector.get_historical_data(
                                 ticker,
                                 sec_type="STK",
-                                duration="1 M",
-                                bar_size_setting="1 hour",
+                                duration="1 Y",
+                                bar_size_setting="1 day",
                             )
                             if und_df is not None and not und_df.empty:
                                 und_df = add_indicators(und_df)
                                 und_analysis = detect_patterns(und_df)
                                 price = und_analysis.get("current_price", 0)
 
-                                # Compute real historical volatility
-                                hv = und_analysis.get(
-                                    "hist_volatility",
-                                    historical_volatility(und_df),
+                                # Fetch Option Implied Volatility directly from IBKR
+                                iv = st.session_state.connector.get_implied_volatility(
+                                    ticker, exchange="SMART", currency="USD"
                                 )
+                                # Fallback to local historical volatility if IV is unavailable
+                                if iv is None or iv <= 0:
+                                    iv = und_analysis.get(
+                                        "hist_volatility",
+                                        historical_volatility(und_df),
+                                    )
+                                    print(f"⚠️ Falling back to local HV: {iv}")
+                                else:
+                                    print(f"📊 Native IBKR IV fetched: {iv}")
 
                                 # Filter strikes near ATM for Greeks computation
                                 atm_range = price * 0.10
@@ -424,14 +442,31 @@ if sec_type == "OPT":
                                 if len(nearby_strikes) < 4:
                                     nearby_strikes = sorted(available_strikes[:20])
 
-                                # Filter expirations by horizon
-                                horizon_map = {
-                                    "weekly": 1,
-                                    "monthly": 2,
-                                    "quarterly": 4,
+                                # Filter expirations based on actual time difference from today
+                                import datetime
+
+                                today_date = datetime.date.today()
+
+                                def get_days_to_exp(exp_str):
+                                    try:
+                                        exp_date = datetime.datetime.strptime(
+                                            exp_str, "%Y%m%d"
+                                        ).date()
+                                        return (exp_date - today_date).days
+                                    except:
+                                        return 0
+
+                                horizon_targets = {
+                                    "weekly": 7,
+                                    "monthly": 30,
+                                    "quarterly": 90,
                                 }
-                                max_exps = horizon_map.get(time_horizon, 2)
-                                limited_exps = available_exps[:max_exps]
+                                target_days = horizon_targets.get(time_horizon, 30)
+                                sorted_exps = sorted(
+                                    available_exps,
+                                    key=lambda x: abs(get_days_to_exp(x) - target_days),
+                                )
+                                limited_exps = sorted(sorted_exps[:3])
 
                                 # Compute Black-Scholes Greeks for all strike x expiry combos
                                 greeks_table = []
@@ -440,7 +475,7 @@ if sec_type == "OPT":
                                         underlying_price=price,
                                         strikes=nearby_strikes,
                                         expiry_str=exp,
-                                        hist_vol=hv,
+                                        hist_vol=iv,
                                     )
                                     greeks_table.extend(exp_greeks)
 
@@ -456,7 +491,10 @@ if sec_type == "OPT":
                                     underlying_price=price,
                                     time_horizon=time_horizon,
                                     greeks_table=greeks_table,
+                                    iv=iv,
                                 )
+                                for s in strategies:
+                                    s["iv_used"] = iv
                                 st.session_state["ai_strategies"] = strategies
                                 st.session_state["ai_strategies_model"] = (
                                     f"{provider_type}/{agent.ai.current_model_name}"
@@ -524,10 +562,12 @@ if sec_type == "OPT":
                                 st.markdown(leg_text)
 
                             # P/L summary
+                            iv_str = f"{strat.get('iv_used', 0.30)*100:.1f}%"
                             st.markdown(
                                 f"\n💰 **Max Profit:** {strat.get('max_profit', 'N/A')} · "
                                 f"💸 **Max Loss:** {strat.get('max_loss', 'N/A')} · "
-                                f"⚖️ **Breakeven:** {strat.get('breakeven', 'N/A')}"
+                                f"⚖️ **Breakeven:** {strat.get('breakeven', 'N/A')} · "
+                                f"📊 **IV Assunta (IBKR IV):** {iv_str}"
                             )
 
                             # AI Rationale (should cite real indicator values)
@@ -535,7 +575,101 @@ if sec_type == "OPT":
                             if rationale:
                                 st.info(f"💡 {rationale}")
 
+                            # Explicit Mathematical Calculations
+                            calc = strat.get("calculations", "")
+                            if calc and calc != "N/A":
+                                st.success(f"🧮 **Calcoli Matematici:**\n\n{calc}")
+
+                            # Load strategy data button
+                            if st.button(
+                                f"📥 Load Strategy Data & Analyze ({strat['name']})",
+                                key=f"btn_load_{i}",
+                            ):
+                                st.session_state["selected_strategy"] = strat
+                                st.session_state["strategy_data_fetch"] = True
+                                st.session_state.pop(
+                                    "market_df", None
+                                )  # Clear single option view
+
                     st.markdown("---")
+
+                    # ── Fetch AI Strategy Data ──────────────────────────────
+                    if st.session_state.get(
+                        "strategy_data_fetch"
+                    ) and st.session_state.get("selected_strategy"):
+                        strat = st.session_state["selected_strategy"]
+                        st.subheader(f"🔄 Fetching Data for: {strat['name']}")
+
+                        leg_data = []  # Store df and meta for each leg
+                        status_placeholder = st.empty()
+
+                        try:
+                            # 1. Fetch the underlying stock
+                            status_placeholder.info(
+                                f"📊 Fetching underlying stock {ticker}..."
+                            )
+                            und_df = st.session_state.connector.get_historical_data(
+                                ticker,
+                                sec_type="STK",
+                                duration=duration,
+                                bar_size_setting=timeframe,
+                            )
+                            if und_df is not None and not und_df.empty:
+                                und_df = add_indicators(und_df)
+                                st.session_state.underlying_df = und_df
+                                st.session_state.underlying_analysis = detect_patterns(
+                                    und_df
+                                )
+
+                            # 2. Fetch each option leg
+                            for leg_idx, leg in enumerate(strat.get("legs", []), 1):
+                                leg_name = f"{leg['right']} {leg['strike']} exp {leg['expiry']}"
+                                status_placeholder.info(
+                                    f"⏳ Fetching Leg {leg_idx}: {leg_name}..."
+                                )
+
+                                leg_df = st.session_state.connector.get_historical_data(
+                                    ticker,
+                                    sec_type="OPT",
+                                    duration=duration,  # Use user's selected duration
+                                    bar_size_setting=timeframe,  # Use user's selected timeframe
+                                    strike=leg["strike"],
+                                    expiry=leg["expiry"],
+                                    right=leg["right"],
+                                )
+
+                                if leg_df is not None and not leg_df.empty:
+                                    leg_df = add_indicators(leg_df)
+                                    leg_meta = {
+                                        "leg_id": leg_idx,
+                                        "action": leg["action"],
+                                        "quantity": leg.get("quantity", 1),
+                                        "strike": leg["strike"],
+                                        "expiry": leg["expiry"],
+                                        "right": leg["right"],
+                                        "name": leg_name,
+                                        "greeks": leg.get("greeks", {}),
+                                    }
+                                    leg_data.append({"meta": leg_meta, "df": leg_df})
+                                else:
+                                    st.warning(
+                                        f"⚠️ No data returned for Leg {leg_idx} ({leg_name})."
+                                    )
+
+                            st.session_state["strategy_legs_data"] = leg_data
+                            st.session_state["strategy_data_fetch"] = (
+                                False  # Reset flag
+                            )
+                            status_placeholder.success(
+                                f"✅ Data loaded for {len(leg_data)} legs of {strat['name']}!"
+                            )
+
+                        except Exception as e:
+                            status_placeholder.error(
+                                f"❌ Error fetching strategy data: {e}"
+                            )
+                            print(f"[ERROR] Strategy Fetch: {type(e).__name__}: {e}")
+                            traceback.print_exc()
 
             # ── Manual Selectors (with AI pre-fill) ─────────────────
             # Determine default indices from AI selection or fallback
@@ -645,7 +779,181 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
 
 # ─── Chart & Stats (persistent after fetch) ─────────────────────────────────
 
-if "market_df" in st.session_state:
+if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_data"]:
+    strat_meta = st.session_state.get("selected_strategy", {})
+    leg_data_list = st.session_state["strategy_legs_data"]
+
+    st.subheader(
+        f"📊 Strategy Analysis: {strat_meta.get('name', 'Custom Option Strategy')}"
+    )
+
+    # Render individual leg metrics
+    st.markdown("**Option Legs Technicals:**")
+    cols = st.columns(len(leg_data_list))
+    for i, leg_bundle in enumerate(leg_data_list):
+        meta = leg_bundle["meta"]
+        df_leg = leg_bundle["df"]
+        with cols[i]:
+            st.markdown(f"**{meta['name']}** ({meta['action']} {meta['quantity']}x)")
+            if df_leg is not None and not df_leg.empty:
+                latest = df_leg.iloc[-1]
+                st.metric("Price", f"${latest['close']:.2f}")
+                vwap_val = latest.get("VWAP")
+                vwap_val = vwap_val if pd.notna(vwap_val) else 0.0
+                rsi_val = latest.get("RSI_14")
+                rsi_val = rsi_val if pd.notna(rsi_val) else 0.0
+                vol_val = latest.get("volume")
+                vol_val = vol_val if pd.notna(vol_val) else 0.0
+
+                st.write(f"**VWAP:** ${vwap_val:.2f}")
+                st.write(f"**RSI(14):** {rsi_val:.1f}")
+                st.write(f"**Vol:** {vol_val:,.0f}")
+                if "greeks" in meta and meta["greeks"]:
+                    st.caption(
+                        f"Δ: {meta['greeks'].get('delta', 0):.2f} | Θ: {meta['greeks'].get('theta', 0):.3f}"
+                    )
+            else:
+                st.warning("Data unavailable.")
+
+    st.markdown("---")
+
+    # Calculate and plot Net Payoff (P/L) Chart
+    st.subheader("📈 Dynamic Payoff (P/L) Profile")
+
+    und_price = 100.0
+    if "underlying_df" in st.session_state and not st.session_state.underlying_df.empty:
+        und_price = st.session_state.underlying_df.iloc[-1]["close"]
+
+    import numpy as np
+
+    # Generate price range +/- 25% from current underlying
+    prices = np.linspace(und_price * 0.75, und_price * 1.25, 200)
+    net_pl = np.zeros_like(prices)
+    net_pl_t0 = np.zeros_like(prices)
+    net_pl_thalf = np.zeros_like(prices)
+
+    # Extraiamo l'IV dalla strategia (fallback 30%)
+    iv = float(strat_meta.get("iv_used", strat_meta.get("hv_used", 0.30)))
+
+    for leg_bundle in leg_data_list:
+        meta = leg_bundle["meta"]
+        strike = float(meta["strike"])
+        qty = float(meta["quantity"])
+        right = meta["right"].upper()
+        is_buy = 1 if meta["action"].upper() == "BUY" else -1
+        expiry_str = meta.get("expiry", "")
+        dte = days_to_expiry(expiry_str) if expiry_str else 30
+
+        # Use greeks price if available, else fallback to latest close from df
+        entry_price = 0.0
+        if "greeks" in meta and "price" in meta["greeks"]:
+            entry_price = float(meta["greeks"]["price"])
+        elif leg_bundle["df"] is not None and not leg_bundle["df"].empty:
+            entry_price = leg_bundle["df"].iloc[-1]["close"]
+
+        # Calculate intrinsic value at expiration
+        if right == "C":
+            payoff = np.maximum(prices - strike, 0)
+        else:
+            payoff = np.maximum(strike - prices, 0)
+
+        # Net P/L for this leg at expiration
+        leg_pl = (
+            (payoff - entry_price) * is_buy * qty * 100
+        )  # * 100 multiplier per contract
+        net_pl += leg_pl
+
+        # T+0 (Today) Dynamic Pricing
+        leg_t0_price = vectorized_black_scholes(prices, strike, dte, 0.05, iv, right)
+        leg_pl_t0 = (leg_t0_price - entry_price) * is_buy * qty * 100
+        net_pl_t0 += leg_pl_t0
+
+        # T+Half (Halfway to expiry) Dynamic Pricing
+        leg_thalf_price = vectorized_black_scholes(
+            prices, strike, dte / 2.0, 0.05, iv, right
+        )
+        leg_pl_thalf = (leg_thalf_price - entry_price) * is_buy * qty * 100
+        net_pl_thalf += leg_pl_thalf
+
+    fig_pl = go.Figure()
+
+    # Dynamic T+0 Line (Today)
+    fig_pl.add_trace(
+        go.Scatter(
+            x=prices,
+            y=net_pl_t0,
+            mode="lines",
+            name="T+0 (Today)",
+            line=dict(color="orange", width=2, dash="dash"),
+        )
+    )
+
+    # Dynamic T+Half Line
+    fig_pl.add_trace(
+        go.Scatter(
+            x=prices,
+            y=net_pl_thalf,
+            mode="lines",
+            name="T+Half",
+            line=dict(color="yellow", width=2, dash="dot"),
+        )
+    )
+
+    # Expiration Line
+    fig_pl.add_trace(
+        go.Scatter(
+            x=prices,
+            y=net_pl,
+            mode="lines",
+            name="At Expiration",
+            line=dict(color="#00ffcc", width=3),
+        )
+    )
+
+    # Add horizontal zero line
+    fig_pl.add_hline(y=0, line_dash="dash", line_color="gray")
+    # Add vertical line for current underlying price
+    fig_pl.add_vline(
+        x=und_price,
+        line_dash="dash",
+        line_color="yellow",
+        annotation_text="Current",
+        annotation_position="top right",
+    )
+
+    # Fill colors for profit / loss
+    fig_pl.add_trace(
+        go.Scatter(
+            x=prices,
+            y=np.maximum(net_pl, 0),
+            fill="tozeroy",
+            fillcolor="rgba(0, 255, 0, 0.2)",
+            line=dict(color="rgba(255,255,255,0)"),
+            showlegend=False,
+            name="Profit Zone",
+        )
+    )
+    fig_pl.add_trace(
+        go.Scatter(
+            x=prices,
+            y=np.minimum(net_pl, 0),
+            fill="tozeroy",
+            fillcolor="rgba(255, 0, 0, 0.2)",
+            line=dict(color="rgba(255,255,255,0)"),
+            showlegend=False,
+            name="Loss Zone",
+        )
+    )
+
+    fig_pl.update_layout(
+        xaxis_title="Underlying Price at Expiration",
+        yaxis_title="Net P/L ($)",
+        height=500,
+        margin=dict(l=20, r=20, t=30, b=20),
+    )
+    st.plotly_chart(fig_pl, width="stretch")
+
+elif "market_df" in st.session_state:
     df = st.session_state.market_df
     analysis = st.session_state.market_analysis
     meta = st.session_state.market_meta
@@ -704,7 +1012,7 @@ if "market_df" in st.session_state:
             fig_und.update_layout(
                 title=f"{meta['ticker']} Underlying ({meta['timeframe']})", height=500
             )
-            st.plotly_chart(fig_und, use_container_width=True)
+            st.plotly_chart(fig_und, width="stretch")
 
         with col_und_stats:
             st.markdown("**Underlying Stats**")
@@ -774,7 +1082,7 @@ if "market_df" in st.session_state:
         fig.update_layout(
             title=f"{meta['ticker']} Price Chart ({meta['timeframe']})", height=600
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with col_stats:
         st.subheader("Technical Stats")

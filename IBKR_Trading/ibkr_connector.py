@@ -213,6 +213,27 @@ class IBKRConnector:
             df.set_index("date", inplace=True)
         return df
 
+    def get_implied_volatility(self, ticker, exchange="SMART", currency="USD"):
+        """Get the Option Implied Volatility index for a stock.
+        Returns the latest IV value (e.g. 0.812 for 81.2%), or None if unavailable.
+        """
+        try:
+            # We request 1 day of historical data using whatToShow='OPTION_IMPLIED_VOLATILITY'
+            df = self.get_historical_data(
+                ticker,
+                sec_type="STK",
+                exchange=exchange,
+                currency=currency,
+                duration="1 D",
+                bar_size_setting="1 day",
+                what_to_show="OPTION_IMPLIED_VOLATILITY",
+            )
+            if df is not None and not df.empty and "close" in df.columns:
+                return float(df["close"].iloc[-1])
+        except Exception as e:
+            print(f"Failed to fetch implied volatility for {ticker}: {e}")
+        return None
+
 
 if __name__ == "__main__":
     connector = IBKRConnector()

@@ -94,22 +94,27 @@ def historical_volatility(df: pd.DataFrame, window: int = 20) -> float:
         hv = log_returns.rolling(window=window).std().iloc[-1]
         # Annualize: multiply by sqrt(trading periods per year)
         # For hourly data (6.5h/day * 252 days ≈ 1638), for daily (252)
+        # Initialize default to prevent assignment error
+        periods_per_year = 252
+
         # Detect from index frequency
         if hasattr(df.index, "freq") and df.index.freq:
             freq = df.index.freq
-        else:
-            # Estimate from average time delta
-            if len(df) > 1:
-                avg_delta = (df.index[-1] - df.index[0]) / len(df)
-                hours = avg_delta.total_seconds() / 3600
-                if hours < 2:  # Sub-hourly or hourly
-                    periods_per_year = 252 * 6.5  # ~1638
-                elif hours < 24:
-                    periods_per_year = 252 * (6.5 / hours)
-                else:
-                    periods_per_year = 252
-            else:
-                periods_per_year = 252
+
+        # Estimate from median time delta for accurate intra-day annualization
+        if len(df) > 1:
+            diffs = df.index.to_series().diff().dropna()
+            if not diffs.empty:
+                median_delta = diffs.median()
+                hours = median_delta.total_seconds() / 3600
+                if hours > 0:
+                    if hours <= 1.5:  # Intraday (e.g., 1 hour, 5 mins)
+                        bars_per_day = 6.5 / hours
+                        periods_per_year = 252 * bars_per_day
+                    elif hours <= 24.0:  # Daily
+                        periods_per_year = 252
+                    else:  # Weekly or Monthly
+                        periods_per_year = 252 / (hours / 24)
 
         annualized = hv * math.sqrt(periods_per_year)
         return round(float(annualized), 4) if not math.isnan(annualized) else 0.30
@@ -161,3 +166,57 @@ def compute_greeks_table(
         )
 
     return results
+
+
+def vectorized_black_scholes(
+    S_array: np.ndarray,
+    K: float,
+    T_days: float,
+    r: float = 0.05,
+    sigma: float = 0.30,
+    option_type: str = "C",
+) -> np.ndarray:
+    """
+    Calculate Black-Scholes prices for an array of underlying prices.
+    Used for plotting dynamic P/L profiles.
+
+    Args:
+        S_array: numpy array of underlying prices
+        K: Strike price
+        T_days: Days to expiration (can be float)
+        r: Risk-free rate
+        sigma: Volatility
+        option_type: 'C' or 'P'
+
+    Returns:
+        numpy array of option prices corresponding to S_array
+    """
+    if T_days <= 0 or K <= 0 or sigma <= 0:
+        if option_type.upper() == "C":
+            return np.maximum(S_array - K, 0)
+        else:
+            return np.maximum(K - S_array, 0)
+
+    T = T_days / 365.0
+    sqrt_T = np.sqrt(T)
+
+    # Prevent division by zero if S_array contains exactly 0
+    S_safe = np.where(S_array <= 0, 1e-9, S_array)
+
+    d1 = (np.log(S_safe / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+
+    Nd1 = norm.cdf(d1)
+    Nd2 = norm.cdf(d2)
+    discount = np.exp(-r * T)
+
+    if option_type.upper() == "C":
+        price_array = S_array * Nd1 - K * discount * Nd2
+    else:
+        Nmd1 = norm.cdf(-d1)
+        Nmd2 = norm.cdf(-d2)
+        price_array = K * discount * Nmd2 - S_array * Nmd1
+
+    # Clamp bounds explicitly to exact intrinsic value at bounds
+    price_array = np.maximum(price_array, 0)
+    return price_array

@@ -21,8 +21,13 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # VWAP requires 'high', 'low', 'close', 'volume' and a datetime index
     try:
         # Check if df index is datetime, if not try to parse or fail gracefully for VWAP
+        # Check if df index is datetime, if not try to parse or fail gracefully for VWAP
         if not isinstance(df.index, pd.DatetimeIndex):
-            print("Warning: Index is not DatetimeIndex, VWAP might fail or return NaN.")
+            # Try to convert to DatetimeIndex if possible
+            try:
+                df.index = pd.to_datetime(df.index)
+            except Exception as e:
+                print(f"Warning: Index could not be converted to DatetimeIndex. {e}")
 
         df["VWAP"] = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
     except Exception as e:
@@ -129,15 +134,21 @@ def detect_patterns(df: pd.DataFrame) -> dict:
             import math
 
             hv_20 = log_ret.rolling(20).std().iloc[-1]
-            # Estimate annualization factor from index
+            # Estimate annualization factor from true median bar size
             if len(df) > 1:
-                avg_hours = (
-                    (df.index[-1] - df.index[0]).total_seconds() / 3600 / len(df)
-                )
-                if avg_hours < 2:
-                    periods = 252 * 6.5
-                elif avg_hours < 24:
-                    periods = 252 * (6.5 / avg_hours)
+                diffs = df.index.to_series().diff().dropna()
+                if not diffs.empty:
+                    median_hours = diffs.median().total_seconds() / 3600
+                    if median_hours > 0:
+                        if median_hours <= 1.5:
+                            bars_per_day = 6.5 / median_hours
+                            periods = 252 * bars_per_day
+                        elif median_hours <= 24:
+                            periods = 252
+                        else:
+                            periods = 252 / (median_hours / 24)
+                    else:
+                        periods = 252
                 else:
                     periods = 252
             else:
