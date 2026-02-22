@@ -213,10 +213,58 @@ class IBKRConnector:
             df.set_index("date", inplace=True)
         return df
 
-    def get_implied_volatility(self, ticker, exchange="SMART", currency="USD"):
-        """Get the Option Implied Volatility index for a stock.
-        Returns the latest IV value (e.g. 0.812 for 81.2%), or None if unavailable.
+    def get_implied_volatility(
+        self,
+        ticker,
+        exchange="SMART",
+        currency="USD",
+        expiry=None,
+        strike=None,
+        right="C",
+    ):
+        """Get the Implied Volatility for a stock or a specific option.
+        If expiry and strike are provided, fetches the exact IV from the option's modelGreeks (delay-friendly).
+        Otherwise fetches the 30-day index IV (OPTION_IMPLIED_VOLATILITY) for the stock.
+        Returns the IV value as a decimal (e.g. 1.06 for 106%), or None if unavailable.
         """
+        if not self.is_ready():
+            return None
+
+        # Fetch specific option IV if requested
+        if expiry and strike is not None:
+            try:
+                contract = Option(
+                    ticker, expiry, float(strike), right, exchange, currency=currency
+                )
+                qualified = self.ib.qualifyContracts(contract)
+                if qualified:
+                    contract = qualified[0]
+                    # Use delayed data (type 3) to allow non-subscribers to get modelGreeks
+                    self.ib.reqMarketDataType(3)
+
+                    # Request tick data including implied volatility (106)
+                    ticker_data = self.ib.reqMktData(
+                        contract, "106", snapshot=False, regulatorySnapshot=False
+                    )
+
+                    # Wait up to 3 seconds for modelGreeks to populate
+                    for _ in range(30):
+                        self.ib.sleep(0.1)
+                        if (
+                            ticker_data.modelGreeks
+                            and ticker_data.modelGreeks.impliedVol
+                        ):
+                            iv = ticker_data.modelGreeks.impliedVol
+                            self.ib.cancelMktData(contract)
+                            return iv if not __import__("math").isnan(iv) else None
+
+                    self.ib.cancelMktData(contract)
+            except Exception as e:
+                print(
+                    f"Failed to fetch option-specific implied volatility for {ticker} {expiry} {strike}: {e}"
+                )
+
+        # Fallback to Stock 30-day IV index
         try:
             # We request 1 day of historical data using whatToShow='OPTION_IMPLIED_VOLATILITY'
             df = self.get_historical_data(
@@ -231,7 +279,7 @@ class IBKRConnector:
             if df is not None and not df.empty and "close" in df.columns:
                 return float(df["close"].iloc[-1])
         except Exception as e:
-            print(f"Failed to fetch implied volatility for {ticker}: {e}")
+            print(f"Failed to fetch stock implied volatility for {ticker}: {e}")
         return None
 
 

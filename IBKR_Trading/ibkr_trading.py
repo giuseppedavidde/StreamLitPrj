@@ -306,14 +306,21 @@ if TraderAgent and AIProvider:
                     "Model", groq_models
                 )
     else:
-        # For Gemini, let AIProvider auto-select the best model
-        st.session_state.ai_model_name = None
-        # Show which model is active
+        # For Gemini, let the user select the model
         try:
-            _temp = AIProvider(provider_type="gemini")
-            st.sidebar.caption(f"Auto: **{_temp.current_model_name}**")
-        except Exception:
-            st.sidebar.caption("Gemini (auto-select)")
+            gemini_models = AIProvider.get_gemini_models()
+        except Exception as e:
+            st.sidebar.error(f"Debug Info: {e}")
+            print(f"Error fetching Gemini models: {e}")
+            gemini_models = AIProvider.FALLBACK_ORDER
+
+        if not gemini_models:
+            st.sidebar.error("❌ Could not fetch Gemini models.")
+            st.session_state.ai_model_name = None
+        else:
+            st.session_state.ai_model_name = st.sidebar.selectbox(
+                "Model", gemini_models
+            )
 
 # EMA Colors
 if TraderAgent and AIProvider:
@@ -419,20 +426,6 @@ if sec_type == "OPT":
                                 und_analysis = detect_patterns(und_df)
                                 price = und_analysis.get("current_price", 0)
 
-                                # Fetch Option Implied Volatility directly from IBKR
-                                iv = st.session_state.connector.get_implied_volatility(
-                                    ticker, exchange="SMART", currency="USD"
-                                )
-                                # Fallback to local historical volatility if IV is unavailable
-                                if iv is None or iv <= 0:
-                                    iv = und_analysis.get(
-                                        "hist_volatility",
-                                        historical_volatility(und_df),
-                                    )
-                                    print(f"⚠️ Falling back to local HV: {iv}")
-                                else:
-                                    print(f"📊 Native IBKR IV fetched: {iv}")
-
                                 # Filter strikes near ATM for Greeks computation
                                 atm_range = price * 0.10
                                 nearby_strikes = sorted(
@@ -470,6 +463,32 @@ if sec_type == "OPT":
                                     key=lambda x: abs(get_days_to_exp(x) - target_days),
                                 )
                                 limited_exps = sorted(sorted_exps[:3])
+
+                                # Identify closest ATM strike and target expiration for precise IV fetching
+                                best_exp = limited_exps[0] if limited_exps else None
+                                closest_strike = (
+                                    min(nearby_strikes, key=lambda s: abs(s - price))
+                                    if nearby_strikes
+                                    else None
+                                )
+
+                                # Fetch Option Implied Volatility directly from IBKR
+                                iv = st.session_state.connector.get_implied_volatility(
+                                    ticker,
+                                    exchange="SMART",
+                                    currency="USD",
+                                    expiry=best_exp,
+                                    strike=closest_strike,
+                                )
+                                # Fallback to local historical volatility if IV is unavailable
+                                if iv is None or iv <= 0:
+                                    iv = und_analysis.get(
+                                        "hist_volatility",
+                                        historical_volatility(und_df),
+                                    )
+                                    print(f"⚠️ Falling back to local HV: {iv}")
+                                else:
+                                    print(f"📊 Native IBKR IV fetched: {iv}")
 
                                 # Compute Black-Scholes Greeks for all strike x expiry combos
                                 greeks_table = []
@@ -1138,9 +1157,7 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
                     # Reusing the singleton TraderAgent to get raw text
                     agent = TraderAgent(
                         provider_type=st.session_state.get("ai_provider", "gemini"),
-                        model_name=st.session_state.get(
-                            "ai_model_name", "gemini-flash-latest"
-                        ),
+                        model_name=st.session_state.get("ai_model_name"),
                     )
                     prompt = f"Sei un Quantitative Options Analyst. Rispondi in italiano.\n\n{hidden_context}\n\nUser Question: {strat_user_input}"
 

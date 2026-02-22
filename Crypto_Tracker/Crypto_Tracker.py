@@ -60,7 +60,18 @@ with st.sidebar.expander("Settings AI", expanded=False):
         )
 
         # Recupera lista modelli da AIProvider (se disponibile)
-        gemini_models = AIProvider.FALLBACK_ORDER if AIProvider else ["gemini-pro"]
+        if AIProvider:
+            try:
+                gemini_models = AIProvider.get_gemini_models(api_key=api_key or env_key)
+            except Exception as e:
+                st.error(f"Errore recupero modelli Gemini: {e}")
+                gemini_models = AIProvider.FALLBACK_ORDER
+
+            if not gemini_models:
+                gemini_models = AIProvider.FALLBACK_ORDER
+        else:
+            gemini_models = ["gemini-pro"]
+
         model_name = st.selectbox("Modello", gemini_models, index=0)
     elif provider_type == "Groq":
         # Recupera API Key da Env o Input
