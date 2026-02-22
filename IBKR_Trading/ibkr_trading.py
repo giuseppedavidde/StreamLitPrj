@@ -254,15 +254,18 @@ duration = st.sidebar.selectbox("Duration", ["1 D", "1 W", "1 M", "3 M", "6 M", 
 # AI Model Selection
 if TraderAgent and AIProvider:
     st.sidebar.title("AI Model")
+    supported_providers = AIProvider.get_supported_providers()
     ai_provider = st.sidebar.selectbox(
         "Provider",
-        ["gemini", "ollama", "groq"],
+        supported_providers,
         format_func=lambda x: (
             "☁️ Gemini (Cloud)"
-            if x == "gemini"
-            else "🖥️ Ollama (Local)" if x == "ollama" else "⚡ Groq (LPU Cloud)"
+            if x.lower() == "gemini"
+            else "🖥️ Ollama (Local)" if x.lower() == "ollama" else "⚡ Groq (LPU Cloud)"
         ),
     )
+    # The application internally relies on lowercased provider strings.
+    ai_provider = ai_provider.lower()
     st.session_state.ai_provider = ai_provider
 
     if ai_provider == "ollama":

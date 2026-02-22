@@ -41,7 +41,10 @@ st.caption(
 # --- 0. SIDEBAR: AI CONFIGURATION ---
 st.sidebar.header("🤖 Configurazione AI")
 with st.sidebar.expander("Settings AI", expanded=False):
-    provider_type = st.selectbox("Provider", ["Gemini", "Ollama"], index=0)
+    supported_providers = (
+        AIProvider.get_supported_providers() if AIProvider else ["Gemini", "Ollama"]
+    )
+    provider_type = st.selectbox("Provider", supported_providers, index=0)
 
     api_key = None
     model_name = None
@@ -59,6 +62,19 @@ with st.sidebar.expander("Settings AI", expanded=False):
         # Recupera lista modelli da AIProvider (se disponibile)
         gemini_models = AIProvider.FALLBACK_ORDER if AIProvider else ["gemini-pro"]
         model_name = st.selectbox("Modello", gemini_models, index=0)
+    elif provider_type == "Groq":
+        # Recupera API Key da Env o Input
+        env_key = os.getenv("GROQ_API_KEY")
+        api_key = st.text_input(
+            "Groq API Key",
+            value=env_key if env_key else "",
+            type="password",
+            help="Se presente nel file .env verra' caricata automaticamente",
+        )
+
+        if AIProvider:
+            groq_models = AIProvider.get_groq_models(api_key=env_key)
+            model_name = st.selectbox("Modello", groq_models, index=0)
     else:
         # Ollama
         if AIProvider:
