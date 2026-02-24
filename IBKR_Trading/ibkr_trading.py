@@ -472,14 +472,28 @@ if sec_type == "OPT":
                                     else None
                                 )
 
-                                # Fetch Option Implied Volatility directly from IBKR
-                                iv = st.session_state.connector.get_implied_volatility(
-                                    ticker,
-                                    exchange="SMART",
-                                    currency="USD",
-                                    expiry=best_exp,
-                                    strike=closest_strike,
+                                # Fetch the global 30-day Implied Volatility (IV) directly from IBKR for the underlying stock
+                                iv_data = (
+                                    st.session_state.connector.get_implied_volatility(
+                                        ticker, exchange="SMART", currency="USD"
+                                    )
                                 )
+
+                                # Handle session_state caching the old IBKRConnector which returned a float
+                                if isinstance(iv_data, dict):
+                                    iv = iv_data.get("avg") if iv_data else None
+                                    raw_iv = iv_data.get("iv") if iv_data else None
+                                    raw_hv = iv_data.get("hv") if iv_data else None
+                                else:
+                                    iv = iv_data
+                                    iv_data = (
+                                        {"avg": iv, "iv": iv, "hv": None}
+                                        if iv is not None
+                                        else None
+                                    )
+                                    raw_iv = iv
+                                    raw_hv = None
+
                                 # Fallback to local historical volatility if IV is unavailable
                                 if iv is None or iv <= 0:
                                     iv = und_analysis.get(
@@ -493,11 +507,29 @@ if sec_type == "OPT":
                                 # Compute Black-Scholes Greeks for all strike x expiry combos
                                 greeks_table = []
                                 for exp in limited_exps:
+                                    # Fetch specific IV for the closest ATM strike of this expiration
+                                    exp_iv_data = st.session_state.connector.get_implied_volatility(
+                                        ticker,
+                                        exchange="SMART",
+                                        currency="USD",
+                                        expiry=exp,
+                                        strike=closest_strike,
+                                    )
+
+                                    exp_iv = iv  # Fallback to stock 30-day IV
+                                    if exp_iv_data and isinstance(exp_iv_data, dict):
+                                        # Prefer the raw option IV (106) if available, else average
+                                        exp_iv_val = exp_iv_data.get(
+                                            "iv"
+                                        ) or exp_iv_data.get("avg")
+                                        if exp_iv_val and exp_iv_val > 0:
+                                            exp_iv = exp_iv_val
+
                                     exp_greeks = compute_greeks_table(
                                         underlying_price=price,
                                         strikes=nearby_strikes,
                                         expiry_str=exp,
-                                        hist_vol=iv,
+                                        hist_vol=exp_iv,
                                     )
                                     greeks_table.extend(exp_greeks)
 
@@ -517,6 +549,7 @@ if sec_type == "OPT":
                                 )
                                 for s in strategies:
                                     s["iv_used"] = iv
+                                    s["iv_data"] = iv_data
                                 st.session_state["ai_strategies"] = strategies
                                 st.session_state["ai_strategies_model"] = (
                                     f"{provider_type}/{agent.ai.current_model_name}"
@@ -584,12 +617,23 @@ if sec_type == "OPT":
                                 st.markdown(leg_text)
 
                             # P/L summary
-                            iv_str = f"{strat.get('iv_used', 0.30)*100:.1f}%"
+                            iv_used = strat.get("iv_used", 0.30)
+                            strat_iv_data = strat.get("iv_data")
+
+                            if (
+                                strat_iv_data
+                                and strat_iv_data.get("iv") is not None
+                                and strat_iv_data.get("hv") is not None
+                            ):
+                                iv_str = f"Avg: {strat_iv_data.get('avg')*100:.1f}% (IV: {strat_iv_data.get('iv')*100:.1f}% | HV: {strat_iv_data.get('hv')*100:.1f}%)"
+                            else:
+                                iv_str = f"{iv_used*100:.1f}%"
+
                             st.markdown(
                                 f"\n💰 **Max Profit:** {strat.get('max_profit', 'N/A')} · "
                                 f"💸 **Max Loss:** {strat.get('max_loss', 'N/A')} · "
                                 f"⚖️ **Breakeven:** {strat.get('breakeven', 'N/A')} · "
-                                f"📊 **IV Assunta (IBKR IV):** {iv_str}"
+                                f"📊 **IV Assunta (IBKR):** {iv_str}"
                             )
 
                             # AI Rationale (should cite real indicator values)
@@ -601,6 +645,88 @@ if sec_type == "OPT":
                             calc = strat.get("calculations", "")
                             if calc and calc != "N/A":
                                 st.success(f"🧮 **Calcoli Matematici:**\n\n{calc}")
+
+                            # ── Esecuzione Ordine IBKR ──────────────────────────
+                            with st.expander(
+                                "🚀 Esecuzione Ordine IBKR (Live)", expanded=False
+                            ):
+                                st.warning(
+                                    "⚠️ L'invio dell'ordine è diretto al tuo account IBKR collegato. Controlla accuratamente i parametri prima di confermare."
+                                )
+
+                                # Calculate theoretical net price
+                                net_price = 0.0
+                                for leg in strat.get("legs", []):
+                                    g = leg.get("greeks")
+                                    if g and "price" in g:
+                                        p = g["price"]
+                                        leg_qty = leg.get("quantity", 1)
+                                        if leg.get("action") == "BUY":
+                                            net_price += p * leg_qty
+                                        else:
+                                            net_price -= p * leg_qty
+
+                                col_o1, col_o2 = st.columns(2)
+                                with col_o1:
+                                    order_type = st.selectbox(
+                                        "Tipo Ordine", ["LMT", "MKT"], key=f"ot_{i}"
+                                    )
+                                    order_qty = st.number_input(
+                                        "Quantità (Moltiplicatore Combo)",
+                                        min_value=1,
+                                        value=1,
+                                        step=1,
+                                        key=f"qty_{i}",
+                                    )
+                                with col_o2:
+                                    limit_price = st.number_input(
+                                        "Prezzo Limite ($)",
+                                        value=round(net_price, 2) if net_price else 0.0,
+                                        step=0.05,
+                                        format="%.2f",
+                                        key=f"lmt_{i}",
+                                        disabled=(order_type == "MKT"),
+                                    )
+
+                                st.markdown("---")
+                                confirm_order = st.checkbox(
+                                    f"Confermo di voler inviare l'ordine per **{strat['name']}**",
+                                    key=f"conf_{i}",
+                                )
+
+                                if st.button(
+                                    "🔥 INVIA ORDINE A IBKR",
+                                    key=f"send_{i}",
+                                    disabled=not confirm_order,
+                                    use_container_width=True,
+                                    type="primary",
+                                ):
+                                    with st.spinner(
+                                        "Trasmissione ordine a IBKR in corso..."
+                                    ):
+                                        res = st.session_state.connector.submit_strategy_order(
+                                            ticker=ticker,
+                                            legs=strat.get("legs", []),
+                                            order_type=order_type,
+                                            limit_price=(
+                                                limit_price
+                                                if order_type == "LMT"
+                                                else None
+                                            ),
+                                            total_quantity=order_qty,
+                                        )
+                                        if res.get("status") == "success":
+                                            st.success(
+                                                f"✅ Ordine inviato! ID: {res.get('order_id')}"
+                                            )
+                                            st.info(res.get("msg"))
+                                            st.toast(
+                                                f"✅ Ordine Inviato: {strat['name']}"
+                                            )
+                                        else:
+                                            st.error(
+                                                f"❌ Errore Invio: {res.get('msg')}"
+                                            )
 
                             # Load strategy data button
                             if st.button(

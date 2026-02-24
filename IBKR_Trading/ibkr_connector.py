@@ -12,7 +12,16 @@ import nest_asyncio
 
 nest_asyncio.apply()
 
-from ib_insync import IB, Stock, Option, util
+from ib_insync import (
+    IB,
+    Stock,
+    Option,
+    Contract,
+    ComboLeg,
+    LimitOrder,
+    MarketOrder,
+    util,
+)
 import pandas as pd
 
 
@@ -230,41 +239,130 @@ class IBKRConnector:
         if not self.is_ready():
             return None
 
-        # Fetch specific option IV if requested
-        if expiry and strike is not None:
+        if expiry and strike:
             try:
+                # Options are best qualified with an empty exchange "" rather than "SMART" to avoid Error 200
                 contract = Option(
-                    ticker, expiry, float(strike), right, exchange, currency=currency
+                    ticker, expiry, float(strike), right, "SMART", "", currency
                 )
                 qualified = self.ib.qualifyContracts(contract)
+
+                # If it fails, try the opposite right just strictly to get the IV of the strike
+                if not qualified:
+                    alt_right = "P" if right == "C" else "C"
+                    alt_contract = Option(
+                        ticker,
+                        expiry,
+                        float(strike),
+                        alt_right,
+                        "SMART",
+                        "",
+                        currency,
+                    )
+                    qualified = self.ib.qualifyContracts(alt_contract)
+
+                # If it still fails, try strict integer strike if it's a whole number
+                if not qualified and float(strike).is_integer():
+                    int_strike = int(float(strike))
+                    int_contract = Option(
+                        ticker,
+                        expiry,
+                        int_strike,
+                        right,
+                        "SMART",
+                        "",
+                        currency,
+                    )
+                    qualified = self.ib.qualifyContracts(int_contract)
+
                 if qualified:
                     contract = qualified[0]
-                    # Use delayed data (type 3) to allow non-subscribers to get modelGreeks
                     self.ib.reqMarketDataType(3)
 
-                    # Request tick data including implied volatility (106)
+                    # Request tick data for implied volatility (106)
                     ticker_data = self.ib.reqMktData(
                         contract, "106", snapshot=False, regulatorySnapshot=False
                     )
 
-                    # Wait up to 3 seconds for modelGreeks to populate
+                    # Clear stale cached values to force waiting for fresh data
+                    ticker_data.impliedVolatility = float("nan")
+
                     for _ in range(30):
                         self.ib.sleep(0.1)
-                        if (
-                            ticker_data.modelGreeks
-                            and ticker_data.modelGreeks.impliedVol
-                        ):
-                            iv = ticker_data.modelGreeks.impliedVol
+                        iv = ticker_data.impliedVolatility
+                        if iv == iv and iv != 0.0:
                             self.ib.cancelMktData(contract)
-                            return iv if not __import__("math").isnan(iv) else None
+                            print(
+                                f"📊 Native IBKR Option IV fetched for {expiry} {strike}{right}: {iv}"
+                            )
+                            return {"iv": float(iv), "hv": None, "avg": float(iv)}
 
                     self.ib.cancelMktData(contract)
             except Exception as e:
                 print(
-                    f"Failed to fetch option-specific implied volatility for {ticker} {expiry} {strike}: {e}"
+                    f"Failed to fetch option specific IV for {ticker} {expiry} {strike}: {e}"
                 )
 
-        # Fallback to Stock 30-day IV index
+        # Fallback to Stock 30-day IV index (Average of Tick type 104 and 106)
+        try:
+            contract = Stock(ticker, exchange, currency)
+            qualified = self.ib.qualifyContracts(contract)
+            if qualified:
+                contract = qualified[0]
+                self.ib.reqMarketDataType(3)
+
+                # Request tick data including implied volatility (106) and historical volatility (104)
+                # TWS typically displays the average of these two for its main IV figure
+                ticker_data = self.ib.reqMktData(
+                    contract, "104,106", snapshot=False, regulatorySnapshot=False
+                )
+
+                # Clear stale cached values to force waiting for fresh data
+                ticker_data.impliedVolatility = float("nan")
+                ticker_data.histVolatility = float("nan")
+
+                # Wait up to 3 seconds for volatilities to populate
+                for _ in range(30):
+                    self.ib.sleep(0.1)
+                    iv = ticker_data.impliedVolatility
+                    hv = ticker_data.histVolatility
+
+                    iv_valid = iv == iv and iv != 0.0
+                    hv_valid = hv == hv and hv != 0.0
+
+                    if iv_valid and hv_valid:
+                        self.ib.cancelMktData(contract)
+                        avg_iv = float((iv + hv) / 2.0)
+                        print(f"📊 Native IBKR IV fetched (106): {iv}")
+                        print(f"📈 Native IBKR HV fetched (104): {hv}")
+                        print(f"⚖️ Calculated Average: {avg_iv}")
+                        return {"iv": float(iv), "hv": float(hv), "avg": avg_iv}
+
+                # If we exhausted the loop, use whatever is available
+                iv = ticker_data.impliedVolatility
+                hv = ticker_data.histVolatility
+                iv_valid = iv == iv and iv != 0.0
+                hv_valid = hv == hv and hv != 0.0
+
+                self.ib.cancelMktData(contract)
+
+                if iv_valid and hv_valid:
+                    avg_iv = float((iv + hv) / 2.0)
+                    print(f"📊 Native IBKR IV fetched (106): {iv}")
+                    print(f"📈 Native IBKR HV fetched (104): {hv}")
+                    print(f"⚖️ Calculated Average: {avg_iv}")
+                    return {"iv": float(iv), "hv": float(hv), "avg": avg_iv}
+                elif iv_valid:
+                    print(f"📊 Native IBKR IV fetched (106): {iv}")
+                    return {"iv": float(iv), "hv": None, "avg": float(iv)}
+                elif hv_valid:
+                    print(f"📈 Native IBKR HV fetched (104): {hv}")
+                    return {"iv": None, "hv": float(hv), "avg": float(hv)}
+
+        except Exception as e:
+            print(f"Failed to fetch stock live implied volatility for {ticker}: {e}")
+
+        # Final Fallback to Historical 30-day IV index
         try:
             # We request 1 day of historical data using whatToShow='OPTION_IMPLIED_VOLATILITY'
             df = self.get_historical_data(
@@ -277,10 +375,180 @@ class IBKRConnector:
                 what_to_show="OPTION_IMPLIED_VOLATILITY",
             )
             if df is not None and not df.empty and "close" in df.columns:
-                return float(df["close"].iloc[-1])
+                iv_close = float(df["close"].iloc[-1])
+                print(f"📊 Native IBKR Historical IV fetched: {iv_close}")
+                return {"iv": iv_close, "hv": None, "avg": iv_close}
         except Exception as e:
-            print(f"Failed to fetch stock implied volatility for {ticker}: {e}")
-        return None
+            print(
+                f"Failed to fetch stock historical implied volatility for {ticker}: {e}"
+            )
+        return {"iv": None, "hv": None, "avg": None}
+
+    def submit_strategy_order(
+        self, ticker, legs, order_type="LMT", limit_price=None, total_quantity=1
+    ):
+        """Build and submit an option strategy order (single or combo).
+
+        Args:
+            ticker: The underlying symbol (e.g. 'AAPL')
+            legs: List of dictionaries defining the strategy legs.
+                  Each dict must have: action ('BUY' or 'SELL'), quantity (int),
+                  expiry ('YYYYMMDD'), strike (float/str), right ('C' or 'P').
+            order_type: "LMT" or "MKT". Defaults to "LMT".
+            limit_price: Required if order_type is "LMT". The total limit price for the strategy.
+            total_quantity: Number of times to execute the whole strategy. Defaults to 1.
+
+        Returns:
+            dict: Contains 'status' (success/error), 'msg' (details), and 'order_id' if successful.
+        """
+        if not self.is_ready():
+            return {"status": "error", "msg": "Not connected to IBKR."}
+
+        self._ensure_loop()
+
+        if not legs:
+            return {"status": "error", "msg": "No legs provided for the strategy."}
+
+        try:
+            # 1. Qualify all individual option contracts to get their conIds
+            qualified_legs = []
+            for leg in legs:
+                opt = Option(
+                    ticker,
+                    leg["expiry"],
+                    float(leg["strike"]),
+                    leg["right"],
+                    "SMART",
+                    "",
+                    "USD",
+                )
+                qualified = self.ib.qualifyContracts(opt)
+
+                # If it fails, try the opposite right (not strictly needed for orders, but useful to catch weird data issues)
+                if not qualified:
+                    alt_right = "P" if leg["right"] == "C" else "C"
+                    alt_contract = Option(
+                        ticker,
+                        leg["expiry"],
+                        float(leg["strike"]),
+                        alt_right,
+                        "SMART",
+                        "",
+                        "USD",
+                    )
+                    qualified = self.ib.qualifyContracts(alt_contract)
+                    if qualified:
+                        # If the alternate right qualified, it means the LLM guessed the WRONG right for that strike (e.g. only puts exist)
+                        # We must update the leg action to match reality, otherwise the order will fail
+                        leg["right"] = alt_right
+                        print(
+                            f"⚠️ Corrected leg right to {alt_right} to match available IBKR chain."
+                        )
+
+                # If it still fails, try strict integer strike if it's a whole number
+                if not qualified and float(leg["strike"]).is_integer():
+                    int_strike = int(float(leg["strike"]))
+                    int_contract = Option(
+                        ticker,
+                        leg["expiry"],
+                        int_strike,
+                        leg["right"],
+                        "SMART",
+                        "",
+                        "USD",
+                    )
+                    qualified = self.ib.qualifyContracts(int_contract)
+
+                if not qualified:
+                    return {"status": "error", "msg": f"Could not qualify leg: {opt}"}
+
+                # Store the qualified contract alongside the requested action/qty
+                qualified_legs.append(
+                    {
+                        "contract": qualified[0],
+                        "action": leg["action"],
+                        "quantity": leg.get("quantity", 1),
+                    }
+                )
+
+            # 2. Build the contract (Single Option vs BAG/Combo)
+            if len(qualified_legs) == 1:
+                # Single leg order
+                main_contract = qualified_legs[0]["contract"]
+                ib_action = qualified_legs[0]["action"]
+                quantity = int(qualified_legs[0]["quantity"]) * total_quantity
+            else:
+                # Multi-leg Combo order (BAG)
+                main_contract = Contract(
+                    symbol=ticker, secType="BAG", exchange="SMART", currency="USD"
+                )
+
+                combo_legs = []
+                for leg_info in qualified_legs:
+                    conId = leg_info["contract"].conId
+                    # For combo legs, action is relative to the combo order action.
+                    # It's generally simpler to just set the combo order action to "BUY"
+                    # and set the leg actions explicitly to what they should be.
+                    leg_action = leg_info["action"]
+                    combo_leg = ComboLeg(
+                        conId=conId,
+                        ratio=int(leg_info["quantity"]),
+                        action=leg_action,
+                        exchange="SMART",
+                    )
+                    combo_legs.append(combo_leg)
+
+                main_contract.comboLegs = combo_legs
+                ib_action = (
+                    "BUY"  # The BAG is "bought", leg actions determine the actual trade
+                )
+                quantity = total_quantity
+
+            # 3. Create the Order object
+            if order_type.upper() == "MKT":
+                order = MarketOrder(ib_action, quantity)
+            elif order_type.upper() == "LMT":
+                if limit_price is None:
+                    return {
+                        "status": "error",
+                        "msg": "Limit price is required for LMT orders.",
+                    }
+                order = LimitOrder(ib_action, quantity, float(limit_price))
+            else:
+                return {
+                    "status": "error",
+                    "msg": f"Unsupported order type: {order_type}",
+                }
+
+            # 4. Submit the Order
+            print(f"Submitting {order_type} order for {main_contract}: {order}")
+            trade = self.ib.placeOrder(main_contract, order)
+
+            # Wait briefly to let the order status update if possible
+            for _ in range(5):
+                self.ib.sleep(0.1)
+
+            status = trade.orderStatus.status
+            if status == "Cancelled" or status == "Inactive":
+                msg = "Order cancelled or inactive. Check TWS for margin/data requirements."
+                # Sometimes margin violations are reported in log
+                if trade.log:
+                    errors = [log.message for log in trade.log if log.message]
+                    if errors:
+                        msg += f" Details: {' | '.join(errors)}"
+                return {"status": "error", "msg": msg}
+
+            return {
+                "status": "success",
+                "msg": f"Order submitted successfully (Status: {status})",
+                "order_id": order.orderId,
+                "trade": trade,  # Passing back the trade object
+            }
+
+        except Exception as e:
+            msg = f"Failed to submit strategy order: {e}"
+            print(f"❌ {msg}")
+            return {"status": "error", "msg": msg}
 
 
 if __name__ == "__main__":
