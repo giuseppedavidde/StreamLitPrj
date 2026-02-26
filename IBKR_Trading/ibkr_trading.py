@@ -166,6 +166,27 @@ def _chat_with_ai(user_message: str, uploaded_files=None) -> str:
     provider_type = st.session_state.get("ai_provider", "gemini")
     model_name = st.session_state.get("ai_model_name")
 
+    # Initialize agent to extract appropriate knowledge based on security type
+    agent = TraderAgent(provider_type=provider_type, model_name=model_name)
+    sec_type = meta.get("sec_type", "STK")
+
+    if sec_type == "OPT":
+        kb = getattr(agent, "knowledge", {}).get("options", "")
+        kb_name = "Fontanills Options"
+        kb_section = (
+            f"\nCONOSCENZA TEORICA (Opzioni - Fontanills):\n{kb}\n" if kb else ""
+        )
+        system_role = "Sei un Quantitative Options Analyst, esperto di strategie in opzioni e greche (modello Fontanills)."
+    else:
+        vpa_knowledge = getattr(agent, "knowledge", {}).get("vpa", "")
+        kb_name = "Coulling/Volman VPA"
+        kb_section = (
+            f"\nCONOSCENZA TEORICA (VPA & Price Action - Coulling/Volman):\n{vpa_knowledge}\n"
+            if vpa_knowledge
+            else ""
+        )
+        system_role = "Sei un trader esperto e analista quantitativo, specializzato in Volume Price Analysis (VPA) e Price Action."
+
     # Build conversation with context
     history_text = ""
     for msg in st.session_state.chat_history[-6:]:
@@ -175,10 +196,12 @@ def _chat_with_ai(user_message: str, uploaded_files=None) -> str:
     import datetime
 
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    text_prompt = f"""Sei un trader esperto e analista quantitativo.
+    text_prompt = f"""{system_role}
 Oggi è il {today_str}.
-Hai accesso ai seguenti dati di mercato REALI per {ticker} ({timeframe}):
+I tuoi principi chiave operativi sono basati su questa knowledge base:
+{kb_section}
 
+Hai accesso ai seguenti dati di mercato REALI per {ticker} ({timeframe}):
 {context}
 
 {'CONVERSAZIONE PRECEDENTE:' + history_text if history_text else ''}
@@ -203,11 +226,10 @@ ISTRUZIONI:
         prompt = text_prompt
 
     try:
-        agent = TraderAgent(provider_type=provider_type, model_name=model_name)
         actual_model = agent.ai.current_model_name
-        print(f"🤖 Chat using: {provider_type} / {actual_model}")
+        print(f"🤖 Chat using: {provider_type} / {actual_model} | KB: {kb_name}")
         response = agent.ai.get_model().generate_content(prompt)
-        model_badge = f"*🤖 Model: `{provider_type}` / `{actual_model}`*\n\n---\n\n"
+        model_badge = f"*🤖 Model: `{provider_type}` / `{actual_model}`*  |  *📚 Knowledge: `{kb_name}`*\n\n---\n\n"
         return model_badge + response.text
     except Exception as e:
         return f"❌ AI Error ({provider_type}/{model_name}): {e}"
@@ -387,20 +409,62 @@ if sec_type == "OPT":
 
             # ── AI Strategy Suggestion ──────────────────────────────
             if TraderAgent and AIProvider:
-                ai_col1, ai_col2 = st.columns([1, 3])
+                import datetime
+
+                today_date = datetime.date.today()
+
+                def get_days_to_exp(exp_str):
+                    try:
+                        exp_date = datetime.datetime.strptime(exp_str, "%Y%m%d").date()
+                        return (exp_date - today_date).days
+                    except:
+                        return 0
+
+                ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
                 with ai_col1:
                     time_horizon = st.radio(
                         "⏱️ Horizon",
-                        ["weekly", "monthly", "quarterly"],
+                        ["weekly", "monthly", "quarterly", "leaps"],
                         index=1,
                         format_func=lambda x: {
                             "weekly": "📅 Weekly",
                             "monthly": "📆 Monthly",
                             "quarterly": "📊 Quarterly",
+                            "leaps": "🚀 LEAPS",
                         }[x],
-                        horizontal=True,
+                        horizontal=False,
                     )
+
+                # Filter Expirations based on Horizon
+                filtered_exps = []
+                for exp in available_exps:
+                    days = get_days_to_exp(exp)
+                    if time_horizon == "weekly" and days <= 14:
+                        filtered_exps.append(exp)
+                    elif time_horizon == "monthly" and 15 <= days <= 45:
+                        filtered_exps.append(exp)
+                    elif time_horizon == "quarterly" and 46 <= days <= 365:
+                        filtered_exps.append(exp)
+                    elif time_horizon == "leaps" and days > 365:
+                        filtered_exps.append(exp)
+
+                # Fallback if no dates fit the exact bucket
+                if not filtered_exps:
+                    filtered_exps = available_exps
+
                 with ai_col2:
+                    selected_exp = st.selectbox(
+                        "🎯 Expiration Date",
+                        options=sorted(filtered_exps),
+                        format_func=lambda x: f"{datetime.datetime.strptime(x, '%Y%m%d').strftime('%b %d, %Y')} ({get_days_to_exp(x)}d)",
+                    )
+
+                    # Convert to list to preserve compatibility with existing logic
+                    limited_exps = [selected_exp] if selected_exp else []
+
+                with ai_col3:
+                    st.write("")  # Spacer
+                    st.write("")  # Spacer
                     suggest_clicked = st.button(
                         "🤖 AI Suggest Strategy",
                         width="stretch",
@@ -426,46 +490,38 @@ if sec_type == "OPT":
                                 und_analysis = detect_patterns(und_df)
                                 price = und_analysis.get("current_price", 0)
 
+                                # Identify target expiration for precise IV pulling and exact valid strikes
+                                best_exp = limited_exps[0] if limited_exps else None
+
+                                # Fetch actual strikes for the specific expiration to avoid Hallucinated LEAP strikes
+                                valid_source_strikes = available_strikes
+                                if best_exp:
+                                    st.write(
+                                        f"🔍 Validating specific available strikes for {best_exp}..."
+                                    )
+                                    specific_strikes = st.session_state.connector.get_strikes_for_expiration(
+                                        ticker, best_exp
+                                    )
+                                    if specific_strikes:
+                                        valid_source_strikes = specific_strikes
+
                                 # Filter strikes near ATM for Greeks computation
                                 atm_range = price * 0.10
                                 nearby_strikes = sorted(
                                     [
                                         s
-                                        for s in available_strikes
+                                        for s in valid_source_strikes
                                         if abs(s - price) <= atm_range
                                     ]
                                 )
                                 if len(nearby_strikes) < 4:
-                                    nearby_strikes = sorted(available_strikes[:20])
+                                    # Fallback: take closest 10 strikes instead of just the first 20 globally
+                                    nearby_strikes = sorted(
+                                        valid_source_strikes,
+                                        key=lambda s: abs(s - price),
+                                    )[:10]
+                                    nearby_strikes = sorted(nearby_strikes)
 
-                                # Filter expirations based on actual time difference from today
-                                import datetime
-
-                                today_date = datetime.date.today()
-
-                                def get_days_to_exp(exp_str):
-                                    try:
-                                        exp_date = datetime.datetime.strptime(
-                                            exp_str, "%Y%m%d"
-                                        ).date()
-                                        return (exp_date - today_date).days
-                                    except:
-                                        return 0
-
-                                horizon_targets = {
-                                    "weekly": 7,
-                                    "monthly": 30,
-                                    "quarterly": 90,
-                                }
-                                target_days = horizon_targets.get(time_horizon, 30)
-                                sorted_exps = sorted(
-                                    available_exps,
-                                    key=lambda x: abs(get_days_to_exp(x) - target_days),
-                                )
-                                limited_exps = sorted(sorted_exps[:3])
-
-                                # Identify closest ATM strike and target expiration for precise IV fetching
-                                best_exp = limited_exps[0] if limited_exps else None
                                 closest_strike = (
                                     min(nearby_strikes, key=lambda s: abs(s - price))
                                     if nearby_strikes
@@ -506,6 +562,9 @@ if sec_type == "OPT":
 
                                 # Compute Black-Scholes Greeks for all strike x expiry combos
                                 greeks_table = []
+                                last_exp_iv = iv
+                                last_exp_iv_data = iv_data
+
                                 for exp in limited_exps:
                                     # Fetch specific IV for the closest ATM strike of this expiration
                                     exp_iv_data = st.session_state.connector.get_implied_volatility(
@@ -524,11 +583,14 @@ if sec_type == "OPT":
                                         ) or exp_iv_data.get("avg")
                                         if exp_iv_val and exp_iv_val > 0:
                                             exp_iv = exp_iv_val
+                                            last_exp_iv = exp_iv
+                                            last_exp_iv_data = exp_iv_data
 
-                                    exp_greeks = compute_greeks_table(
-                                        underlying_price=price,
-                                        strikes=nearby_strikes,
+                                    exp_greeks = st.session_state.connector.get_real_greeks_table(
+                                        ticker=ticker,
                                         expiry_str=exp,
+                                        strikes=nearby_strikes,
+                                        underlying_price=price,
                                         hist_vol=exp_iv,
                                     )
                                     greeks_table.extend(exp_greeks)
@@ -540,16 +602,16 @@ if sec_type == "OPT":
                                 strategies = agent.suggest_option_strategy(
                                     ticker=ticker,
                                     analysis=und_analysis,
-                                    expirations=available_exps,
-                                    strikes=available_strikes,
+                                    expirations=limited_exps,  # CRITICAL: Pass only the user-selected date
+                                    strikes=nearby_strikes,  # CRITICAL: Pass only the valid strikes for that date
                                     underlying_price=price,
                                     time_horizon=time_horizon,
                                     greeks_table=greeks_table,
-                                    iv=iv,
+                                    iv=last_exp_iv,  # Give AI the latest Expiration IV we gathered
                                 )
                                 for s in strategies:
-                                    s["iv_used"] = iv
-                                    s["iv_data"] = iv_data
+                                    s["iv_used"] = last_exp_iv
+                                    s["iv_data"] = last_exp_iv_data
                                 st.session_state["ai_strategies"] = strategies
                                 st.session_state["ai_strategies_model"] = (
                                     f"{provider_type}/{agent.ai.current_model_name}"
@@ -570,7 +632,9 @@ if sec_type == "OPT":
                 ):
                     strategies = st.session_state["ai_strategies"]
                     model_used = st.session_state.get("ai_strategies_model", "")
-                    st.caption(f"*🤖 Suggested by `{model_used}`*")
+                    st.caption(
+                        f"*🤖 Suggested by `{model_used}`*  |  *📚 Knowledge: `Fontanills Options`*"
+                    )
 
                     for i, strat in enumerate(strategies):
                         prob = strat.get("probability", 50)
@@ -776,33 +840,55 @@ if sec_type == "OPT":
                                     f"⏳ Fetching Leg {leg_idx}: {leg_name}..."
                                 )
 
+                                # **CRITICAL**: IBKR does not provide long historical data for options (Error 162)
+                                # Requests for EODChart (e.g. 1 day bars) often fail for options without specific subscriptions.
+                                opt_duration = duration
+                                opt_timeframe = timeframe
+
+                                if (
+                                    "day" in opt_timeframe
+                                    or "week" in opt_timeframe
+                                    or "month" in opt_timeframe
+                                ):
+                                    opt_timeframe = "1 hour"
+                                    opt_duration = "1 W"
+                                elif " Y" in opt_duration:
+                                    opt_duration = "1 M"
+                                elif (
+                                    " M" in opt_duration
+                                    and int(opt_duration.split(" ")[0]) > 1
+                                ):
+                                    opt_duration = "1 M"
+
                                 leg_df = st.session_state.connector.get_historical_data(
                                     ticker,
                                     sec_type="OPT",
-                                    duration=duration,  # Use user's selected duration
-                                    bar_size_setting=timeframe,  # Use user's selected timeframe
+                                    duration=opt_duration,  # Safe duration for options
+                                    bar_size_setting=opt_timeframe,  # Safe timeframe for options
                                     strike=leg["strike"],
                                     expiry=leg["expiry"],
                                     right=leg["right"],
                                 )
 
+                                leg_meta = {
+                                    "leg_id": leg_idx,
+                                    "action": leg["action"],
+                                    "quantity": leg.get("quantity", 1),
+                                    "strike": leg["strike"],
+                                    "expiry": leg["expiry"],
+                                    "right": leg["right"],
+                                    "name": leg_name,
+                                    "greeks": leg.get("greeks", {}),
+                                }
+
                                 if leg_df is not None and not leg_df.empty:
                                     leg_df = add_indicators(leg_df)
-                                    leg_meta = {
-                                        "leg_id": leg_idx,
-                                        "action": leg["action"],
-                                        "quantity": leg.get("quantity", 1),
-                                        "strike": leg["strike"],
-                                        "expiry": leg["expiry"],
-                                        "right": leg["right"],
-                                        "name": leg_name,
-                                        "greeks": leg.get("greeks", {}),
-                                    }
                                     leg_data.append({"meta": leg_meta, "df": leg_df})
                                 else:
                                     st.warning(
-                                        f"⚠️ No data returned for Leg {leg_idx} ({leg_name})."
+                                        f"⚠️ Nessun dato storico per {leg_name}. Uso le Greche teoriche IBKR per il grafico."
                                     )
+                                    leg_data.append({"meta": leg_meta, "df": None})
 
                             st.session_state["strategy_legs_data"] = leg_data
                             st.session_state["strategy_data_fetch"] = (
@@ -995,12 +1081,12 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
         expiry_str = meta.get("expiry", "")
         dte = days_to_expiry(expiry_str) if expiry_str else 30
 
-        # Use greeks price if available, else fallback to latest close from df
+        # Use the REAL market close price if available, else fallback to theoretical greeks
         entry_price = 0.0
-        if "greeks" in meta and "price" in meta["greeks"]:
-            entry_price = float(meta["greeks"]["price"])
-        elif leg_bundle["df"] is not None and not leg_bundle["df"].empty:
+        if leg_bundle["df"] is not None and not leg_bundle["df"].empty:
             entry_price = leg_bundle["df"].iloc[-1]["close"]
+        elif "greeks" in meta and "price" in meta["greeks"]:
+            entry_price = float(meta["greeks"]["price"])
 
         # Calculate intrinsic value at expiration
         if right == "C":
@@ -1285,10 +1371,23 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
                         provider_type=st.session_state.get("ai_provider", "gemini"),
                         model_name=st.session_state.get("ai_model_name"),
                     )
-                    prompt = f"Sei un Quantitative Options Analyst. Rispondi in italiano.\n\n{hidden_context}\n\nUser Question: {strat_user_input}"
+                    kb = getattr(agent, "knowledge", {}).get("options", "")
+                    kb_section = (
+                        f"\nCONOSCENZA TEORICA (Opzioni - Fontanills):\n{kb}\n"
+                        if kb
+                        else ""
+                    )
+
+                    prompt = f"Sei un Quantitative Options Analyst. Rispondi in italiano.\nI tuoi principi chiave operativi sono basati su questa knowledge base:\n{kb_section}\n\n{hidden_context}\n\nUser Question: {strat_user_input}"
 
                     response = agent.ai.get_model().generate_content(prompt)
                     ai_text = response.text
+
+                    # Add model and knowledge badge to Strategy Chat Analyst
+                    actual_model = agent.ai.current_model_name
+                    provider = st.session_state.get("ai_provider", "gemini")
+                    model_badge = f"*🤖 Model: `{provider}` / `{actual_model}`*  |  *📚 Knowledge: `Fontanills Options`*\n\n---\n\n"
+                    ai_text = model_badge + ai_text
 
                     st.session_state.strategy_chat.append(
                         {"role": "assistant", "content": ai_text}
@@ -1449,13 +1548,24 @@ elif "market_df" in st.session_state:
         if st.session_state.get("needs_initial_analysis"):
             st.session_state.needs_initial_analysis = False
             with st.spinner("🤖 AI analyzing market data..."):
-                initial_prompt = (
-                    f"Analizza la situazione di mercato per {meta['ticker']} "
-                    f"sul timeframe {meta['timeframe']}. "
-                    "Fornisci: 1) Analisi Sintetica, 2) Setup (Sì/No/Forse), "
-                    "3) Direzione (Long/Short/Wait), 4) Livelli Chiave (S/L e T/P), "
-                    "5) Probabilità di successo."
-                )
+                if meta.get("sec_type") == "OPT":
+                    initial_prompt = (
+                        f"Analizza la situazione di mercato per l'OPZIONE su {meta['ticker']} "
+                        f"sul timeframe {meta['timeframe']}. "
+                        "Usa i principi teorici di Fontanills per valutare le Greche e la Volatilità. "
+                        "Fornisci: 1) Analisi Sintetica delle Greche e del Pricing, 2) Opportunità Strategica (Sì/No/Forse), "
+                        "3) Direzione Implicita, 4) Livelli Chiave (strutture consigliate), "
+                        "5) Probabilità di successo."
+                    )
+                else:
+                    initial_prompt = (
+                        f"Analizza la situazione di mercato per {meta['ticker']} "
+                        f"sul timeframe {meta['timeframe']}. "
+                        "Usa i principi di Volume Price Analysis (VPA) e Price Action. "
+                        "Fornisci: 1) Analisi VPA (Anomalie prezzo-volume), 2) Setup Volman (se applicabile), "
+                        "3) Direzione (Long/Short/Wait), 4) Livelli Chiave (S/L a 10 pip e T/P a 20 pip), "
+                        "5) Probabilità di successo."
+                    )
                 ai_response = _chat_with_ai(initial_prompt)
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": ai_response}

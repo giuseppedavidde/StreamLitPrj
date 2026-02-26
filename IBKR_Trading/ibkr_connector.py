@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 # Ensure an event loop exists BEFORE importing ib_insync.
 # ib_insync's dependency (eventkit) calls get_event_loop() at module level.
@@ -25,6 +26,30 @@ from ib_insync import (
 import pandas as pd
 
 
+class _IBKRInfoFilter(logging.Filter):
+    """Filter out purely informational IBKR error codes from ib_insync logs.
+
+    Error 10091 = "Market data farm connection is OK" / delayed data notice.
+    Error 10089 = "Not a valid firmquote" (informational).
+    These are not failures; data still arrives correctly. Suppressing them
+    avoids noise in the Streamlit terminal and application logs.
+    """
+
+    _SUPPRESSED = frozenset((10091, 10089))
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        msg = record.getMessage()
+        for code in self._SUPPRESSED:
+            if f"Error {code}," in msg or f"Error {code} " in msg:
+                return False  # Drop this log record
+        return True
+
+
+# Apply filter to the ib_insync logger and its children
+_ib_logger = logging.getLogger("ib_insync")
+_ib_logger.addFilter(_IBKRInfoFilter())
+
+
 class IBKRConnector:
     """Connector for Interactive Brokers via ib_insync.
 
@@ -41,6 +66,42 @@ class IBKRConnector:
         # Save the event loop that IB will use for its socket I/O.
         # This is the loop active when the connector is created.
         self._loop = asyncio.get_event_loop()
+        # Suppress noisy informational errors — Error 10091 is emitted by TWS
+        # whenever delayed data is used instead of real-time. It's not a failure;
+        # data still arrives correctly. We log it at DEBUG level only.
+        self.ib.errorEvent += self._on_error  # type: ignore[operator]
+
+    @staticmethod
+    def _on_error(req_id: int, error_code: int, error_string: str, contract):
+        """Centralized IBKR error handler. Demotes noisy informational codes."""
+        if error_code in (10091, 10089, 399):
+            # 10091 = delayed data availability notice (not a real error)
+            # 10089 = not a firm quote (informational)
+            # 399  = order message (informational)
+            return  # Silently ignore — data still arrives correctly
+        # For all other codes, print normally so real errors are visible
+        print(
+            f"[IBKR Error {error_code}] reqId={req_id}: "
+            f"{error_string}" + (f" | Contract: {contract}" if contract else "")
+        )
+
+    def _patch_wrapper_error(self):
+        """Monkey-patch ib_insync's internal EWrapper.error to suppress Error 10091/10089.
+
+        ib_insync routes TWS error messages from the EClient socket directly to
+        the wrapper's error() method, which then prints to stderr, bypassing the
+        Python logging module entirely.  We wrap that method here to intercept and
+        drop purely informational codes before they appear in the Streamlit log.
+        """
+        _SILENT = frozenset((10091, 10089))
+        original_error = self.ib.wrapper.error  # type: ignore[attr-defined]
+
+        def _filtered_error(req_id, error_code, error_string, contract=""):
+            if error_code in _SILENT:
+                return  # Drop silently — delayed data notice, not a real failure
+            original_error(req_id, error_code, error_string, contract)
+
+        self.ib.wrapper.error = _filtered_error  # type: ignore[method-assign]
 
     def _ensure_loop(self):
         """Re-attach the IB event loop to the current thread.
@@ -76,6 +137,12 @@ class IBKRConnector:
             # After connecting, update the saved loop to the one IB is now using.
             self._loop = asyncio.get_event_loop()
             print(f"Connected to IBKR ({host}:{port})")
+            # Patch the internal EWrapper.error to suppress Error 10091.
+            # This error ("market data requires additional subscription") is purely
+            # informational — TWS still delivers delayed data. Without this patch
+            # ib_insync prints the raw error string directly via its EClient loop,
+            # bypassing Python logging entirely.
+            self._patch_wrapper_error()
         except TimeoutError:
             self.connected = False
             raise ConnectionError(
@@ -156,6 +223,33 @@ class IBKRConnector:
             f"on {', '.join(exchanges)}"
         )
         return sorted(all_exps), sorted(all_strikes)
+
+    def get_strikes_for_expiration(self, ticker, expiry, currency="USD"):
+        """Get the specific strikes available for a given expiration date.
+
+        This prevents passing incorrect half-point strikes (from weeklies)
+        to LEAPS which only have whole number strikes.
+        """
+        if not self.is_ready():
+            raise ConnectionError("Not connected to IBKR.")
+
+        self._ensure_loop()
+
+        # We use an empty strike and an empty right to fetch all options for this expiry
+        contract = Option(ticker, expiry, exchange="SMART", currency=currency)
+        try:
+            details = self.ib.reqContractDetails(contract)
+            if not details:
+                return []
+
+            # Extract just the strikes and return a sorted unique list
+            strikes = sorted(list(set(d.contract.strike for d in details)))
+            return strikes
+        except Exception as e:
+            print(
+                f"[ERROR] Failed to fetch specific strikes for {ticker} {expiry}: {e}"
+            )
+            return []
 
     def get_historical_data(
         self,
@@ -549,6 +643,156 @@ class IBKRConnector:
             msg = f"Failed to submit strategy order: {e}"
             print(f"❌ {msg}")
             return {"status": "error", "msg": msg}
+
+    def get_real_greeks_table(
+        self, ticker, expiry_str, strikes, underlying_price, hist_vol, rate=0.05
+    ):
+        """
+        Fetch real Bid/Ask mid-point prices for each option strike from IBKR.
+        Uses ONLY tick type '100' (Bid/Ask delayed) which works WITHOUT a premium
+        market data subscription, unlike modelGreeks which requires one.
+        Local Black-Scholes Greeks (delta, gamma, theta, vega) are always used
+        since they are computed independently from the real price.
+        Falls back to theoretical Black-Scholes price if Bid/Ask is unavailable.
+        """
+        from option_utils import black_scholes_greeks, days_to_expiry
+        import math
+
+        dte = days_to_expiry(expiry_str)
+
+        # Build pure-theoretical table first as the safe baseline
+        bs_table = {}
+        for s in strikes:
+            bs_table[s] = {
+                "C": black_scholes_greeks(
+                    underlying_price, s, dte, rate, hist_vol, "C"
+                ),
+                "P": black_scholes_greeks(
+                    underlying_price, s, dte, rate, hist_vol, "P"
+                ),
+            }
+
+        if not self.is_ready() or not strikes:
+            results = []
+            for s in strikes:
+                results.append(
+                    {
+                        "strike": s,
+                        "expiry": expiry_str,
+                        "dte": dte,
+                        "call": bs_table[s]["C"],
+                        "put": bs_table[s]["P"],
+                    }
+                )
+            return results
+
+        self._ensure_loop()
+
+        # Set delayed market data (type 3) to avoid real-time subscription requirement
+        self.ib.reqMarketDataType(3)
+
+        # Build and qualify contracts one at a time to handle individual failures gracefully
+        real_prices = {}  # {(strike, right): mid_price}
+
+        # --- EARLY EXIT MECHANISM FOR ERROR 10167 (No Market Data) ---
+        # If the user has no live data subscription for options, TWS will throw Error 10167.
+        # Instead of waiting 20s x (number of strikes) and freezing the UI, we intercept
+        # the error once and break out immediately to use theoretical Greeks.
+        self._no_mkt_data = False
+        original_error_handler = self.ib.wrapper.error  # type: ignore[attr-defined]
+
+        def _catch_10167(req_id, error_code, error_string, contract=""):
+            if error_code == 10167:
+                self._no_mkt_data = True
+                print(
+                    f"⚠️ [Fast Fallback] Nessun abbonamento dati (Err 10167) rilevato. Interrompo le chiamate API per le opzioni."
+                )
+            # Still call the original to preserve the standard logging behavior
+            original_error_handler(req_id, error_code, error_string, contract)
+
+        self.ib.wrapper.error = _catch_10167  # type: ignore[method-assign]
+        # -------------------------------------------------------------
+
+        for s in strikes:
+            if self._no_mkt_data:
+                break  # Stop pinging IBKR entirely for this chain
+
+            for right in ("C", "P"):
+                if self._no_mkt_data:
+                    break
+                try:
+                    contract = Option(
+                        ticker, expiry_str, float(s), right, "SMART", "", "USD"
+                    )
+                    qualified = self.ib.qualifyContracts(contract)
+                    if not qualified:
+                        print(
+                            f"[WARN] Could not qualify {ticker} {expiry_str} {s}{right}"
+                        )
+                        continue
+
+                    qc = qualified[0]
+
+                    # Request snapshot WITHOUT generic ticks — Bid/Ask arrive by default
+                    # Using "100" (generic tick) with snapshot=True on delayed option data
+                    # triggers Error 321 ("Invalid tick type for snapshot") on some contracts.
+                    td = self.ib.reqMktData(
+                        qc, "", snapshot=True, regulatorySnapshot=False
+                    )
+
+                    # Wait up to 2 seconds for Bid/Ask to populate
+                    for _ in range(20):
+                        self.ib.sleep(0.1)
+                        bid = td.bid
+                        ask = td.ask
+                        bid_valid = bid is not None and bid == bid and bid > 0
+                        ask_valid = ask is not None and ask == ask and ask > 0
+                        if bid_valid and ask_valid:
+                            real_prices[(float(s), right)] = round((bid + ask) / 2.0, 4)
+                            break
+
+                    self.ib.cancelMktData(qc)
+
+                except Exception as e:
+                    print(
+                        f"[WARN] Bid/Ask fetch failed for {ticker} {expiry_str} {s}{right}: {e}"
+                    )
+
+        # Restore the original error handler so we don't accidentally leak state
+        self.ib.wrapper.error = original_error_handler  # type: ignore[method-assign]
+
+        # Compose results: real Bid/Ask mid-price + local Black-Scholes Greeks
+        results = []
+        for s in strikes:
+            call_dict = bs_table[s]["C"].copy()
+            put_dict = bs_table[s]["P"].copy()
+
+            mid_call = real_prices.get((float(s), "C"))
+            mid_put = real_prices.get((float(s), "P"))
+
+            if mid_call is not None:
+                call_dict["price"] = mid_call
+                print(
+                    f"✅ Real Bid/Ask price for {ticker} {expiry_str} {s}C: ${mid_call}"
+                )
+
+            if mid_put is not None:
+                put_dict["price"] = mid_put
+                print(
+                    f"✅ Real Bid/Ask price for {ticker} {expiry_str} {s}P: ${mid_put}"
+                )
+
+            results.append(
+                {
+                    "strike": s,
+                    "expiry": expiry_str,
+                    "dte": dte,
+                    "call": call_dict,
+                    "put": put_dict,
+                }
+            )
+
+        return results
 
 
 if __name__ == "__main__":
