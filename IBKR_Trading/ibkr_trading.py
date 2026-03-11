@@ -283,7 +283,11 @@ if TraderAgent and AIProvider:
         format_func=lambda x: (
             "☁️ Gemini (Cloud)"
             if x.lower() == "gemini"
-            else "🖥️ Ollama (Local)" if x.lower() == "ollama" else "⚡ Groq (LPU Cloud)"
+            else "🖥️ Ollama (Local)"
+            if x.lower() == "ollama"
+            else "⚡ Groq (LPU Cloud)"
+            if x.lower() == "groq"
+            else "🧠 Claude (Puter Free)"
         ),
     )
     # The application internally relies on lowercased provider strings.
@@ -327,6 +331,26 @@ if TraderAgent and AIProvider:
                 st.session_state.ai_model_name = st.sidebar.selectbox(
                     "Model", groq_models
                 )
+    elif ai_provider == "puter":
+        # Puter / Claude Free API
+        puter_key = os.getenv("PUTER_API_KEY")
+        if not puter_key:
+            puter_key = st.sidebar.text_input(
+                "Puter Auth Token",
+                type="password",
+                help="Get your token from puter.com → Settings. Stored as PUTER_API_KEY env var.",
+            )
+            if puter_key:
+                os.environ["PUTER_API_KEY"] = puter_key
+
+        if not os.getenv("PUTER_API_KEY"):
+            st.sidebar.warning("🔑 Puter Auth Token required. Get it from puter.com.")
+            st.session_state.ai_model_name = None
+        else:
+            puter_models = AIProvider.get_puter_models()
+            st.session_state.ai_model_name = st.sidebar.selectbox(
+                "Claude Model", puter_models
+            )
     else:
         # For Gemini, let the user select the model
         try:
