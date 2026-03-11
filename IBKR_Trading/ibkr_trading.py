@@ -353,6 +353,155 @@ if TraderAgent and AIProvider:
 else:
     ema20_color, ema50_color, ema200_color = "#00BFFF", "#FFD700", "#FF1493"
 
+# ─── Navigation & Modes ─────────────────────────────────────────────────────
+st.sidebar.markdown("---")
+view_mode = st.sidebar.radio(
+    "Navigation", ["🔍 Trading Dashboard", "🎡 Wheel Strategy Scanner"]
+)
+
+if view_mode == "🎡 Wheel Strategy Scanner":
+    st.title("🎡 AI Wheel Strategy Scanner")
+    st.markdown(
+        "Scan a list of tickers to find the absolute best candidates for Cash-Secured Puts (Wheel Strategy Phase 1)."
+    )
+
+    tickers_input = st.text_area(
+        "Tickers to Scan (comma separated)", "AAPL, MSFT, SPY, QQQ, NVDA, TSLA, AMD"
+    )
+
+    time_horizon = st.radio(
+        "⏱️ Investment Horizon (Days to Expiration)",
+        ["weekly (1-2w)", "monthly (3-6w)", "quarterly (3-6m)"],
+        index=1,
+        horizontal=True,
+    )
+
+    if st.button("🚀 Run Wheel Scanner", type="primary"):
+        if not is_connected:
+            st.error("Connect to IBKR first!")
+        else:
+            with st.spinner(
+                "Scanning market data and computing IV (this may take a minute)..."
+            ):
+                tickers = [
+                    t.strip().upper() for t in tickers_input.split(",") if t.strip()
+                ]
+                market_data = []
+
+                for t in tickers:
+                    try:
+                        # Fetch short-term data to get Price, RSI, Trend
+                        df = st.session_state.connector.get_historical_data(
+                            ticker=t,
+                            sec_type="STK",
+                            duration="6 M",
+                            bar_size_setting="1 day",
+                        )
+                        if df is not None and not df.empty:
+                            from technical_analysis import (
+                                add_indicators,
+                                detect_patterns,
+                            )
+
+                            df = add_indicators(df)
+                            analysis = detect_patterns(df)
+
+                            price = analysis.get("current_price", df.iloc[-1]["close"])
+                            rsi = analysis.get("rsi", "N/A")
+                            trend = analysis.get("trend", "N/A")
+
+                            # Get IV
+                            iv_data = st.session_state.connector.get_implied_volatility(
+                                t
+                            )
+                            if isinstance(iv_data, dict):
+                                iv_val = iv_data.get("iv") or iv_data.get("avg")
+                            else:
+                                iv_val = iv_data
+
+                            iv_str = f"{iv_val*100:.1f}%" if iv_val else "N/A"
+
+                            market_data.append(
+                                {
+                                    "ticker": t,
+                                    "price": (
+                                        round(price, 2)
+                                        if isinstance(price, (int, float))
+                                        else price
+                                    ),
+                                    "iv": iv_str,
+                                    "bid_ask_spread": "N/A",  # Will be inferred tight for large caps
+                                    "trend": trend,
+                                    "rsi": (
+                                        round(rsi, 2)
+                                        if isinstance(rsi, (int, float))
+                                        else rsi
+                                    ),
+                                }
+                            )
+                    except Exception as e:
+                        st.warning(f"Could not fetch data for {t}: {e}")
+
+                if market_data:
+                    st.info("Market data gathered. Running AI Candidate Analysis...")
+
+                    if not TraderAgent:
+                        st.error(
+                            "TraderAgent module not loaded. Check environment/imports."
+                        )
+                    else:
+                        agent = TraderAgent(
+                            provider_type=st.session_state.get("ai_provider", "gemini"),
+                            model_name=st.session_state.get("ai_model_name"),
+                        )
+
+                        try:
+                            import json
+
+                            res_json_str = agent.scan_put_selling_candidates(
+                                market_data, time_horizon=time_horizon
+                            )
+                            res = json.loads(res_json_str)
+
+                            st.success("✅ AI Analysis Complete")
+                            overview = res.get("market_overview", "")
+                            if overview:
+                                st.markdown(f"**Overview:** {overview}")
+
+                            st.subheader("🏆 Best Candidates")
+                            best = res.get("best_candidates", [])
+                            if best:
+                                for c in best:
+                                    with st.expander(
+                                        f"⭐ {c.get('ticker')} (Score: {c.get('score')}/10)",
+                                        expanded=True,
+                                    ):
+                                        st.write(
+                                            f"**Suggested Delta:** {c.get('suggested_delta')}"
+                                        )
+                                        st.info(f"💡 {c.get('rationale')}")
+                            else:
+                                st.warning("No suitable candidates found in this list.")
+
+                            st.subheader("❌ Rejected Candidates")
+                            rejected = res.get("rejected_candidates", [])
+                            if rejected:
+                                for c in rejected:
+                                    st.error(
+                                        f"**{c.get('ticker')}**: {c.get('reason')}"
+                                    )
+                            else:
+                                st.success("No candidates were explicitly rejected.")
+                        except json.JSONDecodeError:
+                            st.error("AI returned invalid JSON. Raw response:")
+                            st.code(res_json_str)
+                        except Exception as e:
+                            st.error(f"Error executing AI analysis: {e}")
+                else:
+                    st.error("No valid market data could be gathered.")
+
+    st.stop()  # Stops execution here so the standard dashboard won't render below
+
 # ─── Main Area ──────────────────────────────────────────────────────────────
 
 st.title("📈 IBKR AI Trading Dashboard")
