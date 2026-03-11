@@ -978,6 +978,69 @@ if sec_type == "OPT":
 
                     st.markdown("---")
 
+                    # ─── Options Strategies General Chat ────────────────────────
+                    st.subheader("💬 Chat Analisi Strategie Proposte")
+                    
+                    if "opt_strategies_chat" not in st.session_state:
+                        st.session_state.opt_strategies_chat = []
+                        
+                    # Calculate summary context string once
+                    strats_context = ""
+                    for strat in strategies:
+                        strats_context += f"- **{strat['name']}** ({strat.get('direction', 'NEUTRAL')}): Max Profit {strat.get('max_profit', 'N/A')}, Max Loss {strat.get('max_loss', 'N/A')}, Breakeven {strat.get('breakeven', 'N/A')}\n"
+                    
+                    hidden_ctx = (
+                        f"CONTESTO SULLE STRATEGIE APPENA PROPOSTE ALL'UTENTE:\n{strats_context}\n\n"
+                        f"L'utente ti sta facendo domande su queste soluzioni per capire validità, rischi, o eventuali aspetti sfuggiti al calcolo iniziale."
+                    )
+                    
+                    for msg in st.session_state.opt_strategies_chat:
+                        with st.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "👤"):
+                            st.markdown(msg["content"])
+                            
+                    if opt_chat_input := st.chat_input("Chiedi all'AI chiarimenti sulle strategie proposte sopra..."):
+                        st.session_state.opt_strategies_chat.append({"role": "user", "content": opt_chat_input})
+                        with st.chat_message("user", avatar="👤"):
+                            st.markdown(opt_chat_input)
+                            
+                        with st.spinner("🤖 Analizzando le strategie proposte in base alla tua domanda..."):
+                            try:
+                                agent = TraderAgent(
+                                    provider_type=st.session_state.get("ai_provider", "gemini"),
+                                    model_name=st.session_state.get("ai_model_name"),
+                                )
+                                kb = getattr(agent, "knowledge", {}).get("options", "")
+                                kb_section = f"\nCONOSCENZA TEORICA (Opzioni - Fontanills):\n{kb}\n" if kb else ""
+                                
+                                history_text = ""
+                                for m in st.session_state.opt_strategies_chat[:-1][-4:]:
+                                    role = "User" if m["role"] == "user" else "Analyst"
+                                    history_text += f"{role}: {m['content']}\n"
+                                
+                                prompt = (
+                                    f"Sei un Quantitative Options Analyst. Rispondi in italiano in modo conciso e analitico.\n"
+                                    f"I tuoi principi chiave operativi sono basati su questa knowledge base:\n{kb_section}\n\n"
+                                    f"{hidden_ctx}\n\n"
+                                    f"{'CONVERSAZIONE PRECEDENTE:' + history_text if history_text else ''}\n"
+                                    f"DOMANDA DELL'UTENTE: {opt_chat_input}"
+                                )
+                                
+                                response = agent.ai.get_model().generate_content(prompt)
+                                ai_text = response.text
+                                
+                                actual_model = agent.ai.current_model_name
+                                provider = st.session_state.get("ai_provider", "gemini")
+                                model_badge = f"*🤖 Model: `{provider}` / `{actual_model}`*  |  *📚 Knowledge: `Fontanills Options`*\n\n---\n\n"
+                                formatted_ai_text = model_badge + ai_text
+                                
+                                st.session_state.opt_strategies_chat.append({"role": "assistant", "content": formatted_ai_text})
+                                with st.chat_message("assistant", avatar="🤖"):
+                                    st.markdown(formatted_ai_text)
+                            except Exception as e:
+                                st.error(f"Errore Strategy Chat: {e}")
+
+                    st.markdown("---")
+
                     # ── Fetch AI Strategy Data ──────────────────────────────
                     if st.session_state.get(
                         "strategy_data_fetch"
