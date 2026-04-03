@@ -1,0 +1,6 @@
+*.env*
+*.venv*
+*.pyc*
+*.pycache*
+*.DS_Store*
+*.md*

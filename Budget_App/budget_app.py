@@ -208,8 +208,15 @@ if not df.empty:
                 )
 
                 if AIProvider:
-                    groq_models = AIProvider.get_groq_models(api_key=env_key)
-                    model_name = st.selectbox("Modello", groq_models, index=0)
+                    # Usa la chiave inserita dall'utente (o da env) per recuperare i modelli live
+                    effective_key = api_key or env_key
+                    groq_models = AIProvider.get_groq_models(api_key=effective_key)
+                    model_name = st.selectbox(
+                        "Modello",
+                        groq_models,
+                        index=0,
+                        help="🌙 moonshotai/kimi-k2-instruct è pre-selezionato come default (miglior modello per PDF). Se non disponibile nella tua lista Groq, seleziona manualmente.",
+                    )
             else:
                 # Ollama
                 if AIProvider:

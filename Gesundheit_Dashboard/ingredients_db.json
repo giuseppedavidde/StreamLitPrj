@@ -1,0 +1,50 @@
+{
+  "veggie": [
+    {"name": "Verdure Miste", "pro": 2.0, "cho": 4.0, "fat": 0.2, "kcal": 25},
+    {"name": "Zucchine", "pro": 1.2, "cho": 3.1, "fat": 0.1, "kcal": 17},
+    {"name": "Spinaci", "pro": 2.8, "cho": 1.4, "fat": 0.4, "kcal": 23},
+    {"name": "Pomodorini", "pro": 1.0, "cho": 3.9, "fat": 0.2, "kcal": 18},
+    {"name": "Broccoli", "pro": 3.0, "cho": 3.0, "fat": 0.3, "kcal": 34}
+  ],
+  "carb": [
+    {"name": "Pasta Integrale", "pro": 13.0, "cho": 65.0, "fat": 2.5, "kcal": 350},
+    {"name": "Riso Basmati", "pro": 9.0, "cho": 78.0, "fat": 1.0, "kcal": 360},
+    {"name": "Pane Integrale", "pro": 8.0, "cho": 45.0, "fat": 1.5, "kcal": 240},
+    {"name": "Patate", "pro": 2.0, "cho": 17.0, "fat": 0.1, "kcal": 77},
+    {"name": "Farro", "pro": 15.0, "cho": 67.0, "fat": 2.5, "kcal": 338},
+    {"name": "Cous Cous", "pro": 12.0, "cho": 77.0, "fat": 0.6, "kcal": 376}
+  ],
+  "protein": [
+    {"name": "Petto di Pollo", "pro": 31.0, "cho": 0.0, "fat": 3.6, "kcal": 165},
+    {"name": "Ceci (precotti)", "pro": 7.0, "cho": 16.0, "fat": 2.5, "kcal": 120},
+    {"name": "Fagioli (precotti)", "pro": 8.0, "cho": 15.0, "fat": 0.5, "kcal": 105},
+    {"name": "Lenticchie", "pro": 9.0, "cho": 20.0, "fat": 0.4, "kcal": 116},
+    {"name": "Filetto di Merluzzo", "pro": 18.0, "cho": 0.0, "fat": 0.7, "kcal": 82},
+    {"name": "Tofu Naturale", "pro": 16.0, "cho": 2.0, "fat": 9.0, "kcal": 144},
+    {"name": "Uova (Intere)", "pro": 13.0, "cho": 1.1, "fat": 11.0, "kcal": 155},
+    {"name": "Tempeh", "pro": 19.0, "cho": 9.0, "fat": 11.0, "kcal": 193}
+  ],
+  "fat": [
+    {"name": "Olio Evo", "pro": 0.0, "cho": 0.0, "fat": 100.0, "kcal": 900},
+    {"name": "Mandorle", "pro": 21.0, "cho": 21.0, "fat": 50.0, "kcal": 579},
+    {"name": "Noci", "pro": 15.0, "cho": 14.0, "fat": 65.0, "kcal": 654},
+    {"name": "Burro di Arachidi", "pro": 25.0, "cho": 20.0, "fat": 50.0, "kcal": 588}
+  ],
+  "breakfast_carb": [
+    {"name": "Fiocchi d'Avena", "pro": 13.0, "cho": 60.0, "fat": 7.0, "kcal": 360},
+    {"name": "Pane di Segale", "pro": 6.0, "cho": 40.0, "fat": 1.0, "kcal": 210},
+    {"name": "Mela", "pro": 0.3, "cho": 14.0, "fat": 0.2, "kcal": 52},
+    {"name": "Banana", "pro": 1.1, "cho": 23.0, "fat": 0.3, "kcal": 89}
+  ],
+  "breakfast_pro": [
+    {"name": "Yogurt Greco 0%", "pro": 10.0, "cho": 4.0, "fat": 0.0, "kcal": 59},
+    {"name": "Skyr", "pro": 11.0, "cho": 4.0, "fat": 0.2, "kcal": 65},
+    {"name": "Latte di Mandorla (zero Zuccheri)", "pro": 0.4, "cho": 0.1, "fat": 1.1, "kcal": 13},
+    {"name": "Proteine in Polvere (Whey)", "pro": 80.0, "cho": 5.0, "fat": 5.0, "kcal": 385}
+  ],
+  "breakfast_fat": [
+    {"name": "Semi di Chia", "pro": 17.0, "cho": 42.0, "fat": 31.0, "kcal": 486},
+    {"name": "Burro di Mandorle", "pro": 21.0, "cho": 19.0, "fat": 55.0, "kcal": 614},
+    {"name": "Cioccolato Fondente 85%", "pro": 8.0, "cho": 20.0, "fat": 50.0, "kcal": 600}
+  ]
+}

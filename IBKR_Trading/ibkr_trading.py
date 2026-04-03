@@ -380,7 +380,7 @@ else:
 # ─── Navigation & Modes ─────────────────────────────────────────────────────
 st.sidebar.markdown("---")
 view_mode = st.sidebar.radio(
-    "Navigation", ["🔍 Trading Dashboard", "🎡 Wheel Strategy Scanner"]
+    "Navigation", ["🔍 Trading Dashboard", "🎡 Wheel Strategy Scanner", "📊 Earnings Backtester"]
 )
 
 if view_mode == "🎡 Wheel Strategy Scanner":
@@ -525,6 +525,253 @@ if view_mode == "🎡 Wheel Strategy Scanner":
                     st.error("No valid market data could be gathered.")
 
     st.stop()  # Stops execution here so the standard dashboard won't render below
+
+elif view_mode == "📊 Earnings Backtester":
+    from earnings_backtester import (
+        get_earnings_dates,
+        backtest_earnings_strategies,
+        summarize_results,
+        build_detail_table,
+        STRATEGY_CATALOG,
+    )
+
+    st.title("📊 Earnings Pattern Backtester")
+    st.markdown(
+        "Backtest options strategies across historical earnings events to identify "
+        "profitable patterns. Uses **Black-Scholes theoretical pricing** for simulation."
+    )
+
+    # ── Parameters ────────────────────────────────────────────────────────
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        bt_ticker = st.text_input("Ticker", value=ticker, key="bt_ticker")
+        num_earnings = st.slider(
+            "Number of past earnings to analyse",
+            min_value=2,
+            max_value=20,
+            value=8,
+            step=1,
+            key="bt_num_earnings",
+        )
+    with col_p2:
+        entry_days = st.number_input(
+            "Entry days before earnings",
+            min_value=1,
+            max_value=10,
+            value=1,
+            step=1,
+            key="bt_entry_days",
+        )
+        exit_days = st.number_input(
+            "Exit days after earnings",
+            min_value=1,
+            max_value=10,
+            value=1,
+            step=1,
+            key="bt_exit_days",
+        )
+
+    col_p3, col_p4 = st.columns(2)
+    with col_p3:
+        dte_assumption = st.number_input(
+            "Assumed DTE at entry (days)",
+            min_value=1,
+            max_value=60,
+            value=7,
+            step=1,
+            key="bt_dte",
+            help="The number of days to expiration assumed for the option at entry. "
+            "A weekly option would be ~7, monthly ~30.",
+        )
+    with col_p4:
+        otm_pct = st.slider(
+            "OTM distance (% of stock price)",
+            min_value=1,
+            max_value=20,
+            value=5,
+            step=1,
+            key="bt_otm_pct",
+            help="How far out-of-the-money the OTM strikes should be for strangles, spreads, etc.",
+        )
+
+    selected_strategies = st.multiselect(
+        "Strategies to backtest",
+        options=list(STRATEGY_CATALOG.keys()),
+        default=["Long Straddle", "Long Strangle", "Iron Condor"],
+        key="bt_strategies",
+    )
+
+    # Show strategy descriptions
+    with st.expander("ℹ️ Strategy Descriptions", expanded=False):
+        for sname, sdef in STRATEGY_CATALOG.items():
+            icon = "✅" if sname in selected_strategies else "⬜"
+            st.markdown(f"{icon} **{sname}**: {sdef['description']}")
+
+    # ── Run Backtest ──────────────────────────────────────────────────────
+    if st.button("🚀 Run Earnings Backtest", type="primary", use_container_width=True):
+        if not selected_strategies:
+            st.error("Please select at least one strategy.")
+        elif not is_connected:
+            st.error("Connect to IBKR first! (required for historical price data)")
+        else:
+            # Step 1: Fetch earnings dates (no IBKR needed)
+            with st.spinner(f"📅 Fetching earnings dates for {bt_ticker} from Yahoo Finance..."):
+                try:
+                    earnings_dates = get_earnings_dates(bt_ticker, count=num_earnings)
+                except Exception as e:
+                    st.error(f"❌ Failed to fetch earnings dates: {e}")
+                    earnings_dates = []
+
+            if not earnings_dates:
+                st.warning(
+                    f"No past earnings dates found for {bt_ticker}. "
+                    "Check the ticker symbol or try a different stock."
+                )
+            else:
+                st.info(
+                    f"Found **{len(earnings_dates)}** past earnings events for "
+                    f"**{bt_ticker}**: {', '.join(str(d) for d in earnings_dates)}"
+                )
+
+                # Step 2: Run backtest (needs IBKR)
+                progress_text = st.empty()
+                progress_bar = st.progress(0)
+                completed = {"n": 0}
+
+                def _bt_progress(msg):
+                    completed["n"] += 1
+                    pct = min(int(completed["n"] / (len(earnings_dates) + 1) * 100), 99)
+                    progress_bar.progress(pct)
+                    progress_text.text(msg)
+
+                try:
+                    results = backtest_earnings_strategies(
+                        connector=st.session_state.connector,
+                        ticker=bt_ticker,
+                        earnings_dates=earnings_dates,
+                        strategy_names=selected_strategies,
+                        entry_days_before=entry_days,
+                        exit_days_after=exit_days,
+                        dte_assumption=dte_assumption,
+                        otm_pct=otm_pct / 100.0,
+                        progress_callback=_bt_progress,
+                    )
+                except Exception as e:
+                    st.error(f"❌ Backtest failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    results = []
+
+                progress_bar.progress(100)
+                progress_text.text("✅ Backtest complete!")
+
+                if not results:
+                    st.warning("No valid results were generated. Is IBKR providing data for this ticker?")
+                else:
+                    st.session_state["bt_results"] = results
+                    st.session_state["bt_strategies_used"] = selected_strategies
+                    st.session_state["bt_ticker_used"] = bt_ticker
+
+    # ── Display Results ───────────────────────────────────────────────────
+    if "bt_results" in st.session_state and st.session_state["bt_results"]:
+        results = st.session_state["bt_results"]
+        strat_used = st.session_state["bt_strategies_used"]
+        bt_tk = st.session_state["bt_ticker_used"]
+
+        st.markdown("---")
+        st.subheader(f"📈 Results for {bt_tk} — {len(results)} Earnings Events")
+
+        # Summary Table
+        summary_df = summarize_results(results, strat_used)
+        st.markdown("### 🏆 Strategy Summary")
+
+        # Highlight the best strategy
+        if not summary_df.empty and summary_df["Trades"].sum() > 0:
+            best_idx = summary_df["Total P/L ($)"].idxmax()
+            best_strat = summary_df.loc[best_idx, "Strategy"]
+            best_pnl = summary_df.loc[best_idx, "Total P/L ($)"]
+            best_wr = summary_df.loc[best_idx, "Win Rate (%)"]
+
+            if best_pnl > 0:
+                st.success(
+                    f"🏆 **Best Strategy: {best_strat}** — "
+                    f"Total P/L: **${best_pnl:+,.2f}** per contract | "
+                    f"Win Rate: **{best_wr:.1f}%**"
+                )
+            else:
+                st.warning(
+                    f"⚠️ No strategy was profitable overall. "
+                    f"Best: {best_strat} (${best_pnl:+,.2f})"
+                )
+
+        st.dataframe(
+            summary_df.style.format({
+                "Win Rate (%)": "{:.1f}%",
+                "Avg P/L ($)": "${:+,.2f}",
+                "Total P/L ($)": "${:+,.2f}",
+                "Max Win ($)": "${:+,.2f}",
+                "Max Loss ($)": "${:+,.2f}",
+            }).apply(
+                lambda row: [
+                    "background-color: rgba(0,255,0,0.15)" if row["Total P/L ($)"] > 0
+                    else "background-color: rgba(255,0,0,0.15)" if row["Total P/L ($)"] < 0
+                    else ""
+                ] * len(row),
+                axis=1,
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # P/L Bar Chart per Earnings Event
+        st.markdown("### 📊 P/L per Earnings Event")
+        detail_df = build_detail_table(results, strat_used)
+
+        # Build grouped bar chart (go already imported at top of file)
+
+        fig_pnl = go.Figure()
+        colors = ["#00ccff", "#ff6b6b", "#ffd93d", "#6bcb77", "#c084fc", "#ff922b"]
+        for i, strat_name in enumerate(strat_used):
+            col_name = f"{strat_name} P/L ($)"
+            if col_name in detail_df.columns:
+                pnl_vals = detail_df[col_name].fillna(0)
+                bar_colors = ["rgba(0,200,0,0.7)" if v >= 0 else "rgba(200,0,0,0.7)" for v in pnl_vals]
+                fig_pnl.add_trace(
+                    go.Bar(
+                        x=[str(d) for d in detail_df["Earnings Date"]],
+                        y=pnl_vals,
+                        name=strat_name,
+                        marker_color=colors[i % len(colors)],
+                    )
+                )
+
+        fig_pnl.update_layout(
+            barmode="group",
+            xaxis_title="Earnings Date",
+            yaxis_title="P/L per Contract ($)",
+            height=450,
+            margin=dict(l=20, r=20, t=30, b=20),
+        )
+        fig_pnl.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig_pnl, use_container_width=True)
+
+        # Stock Move Distribution
+        st.markdown("### 📉 Stock Move Around Earnings")
+        moves = [r["move_pct"] for r in results]
+        abs_moves = [r["abs_move_pct"] for r in results]
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric("Avg Move", f"{sum(moves)/len(moves):+.2f}%")
+        with col_m2:
+            st.metric("Avg |Move|", f"{sum(abs_moves)/len(abs_moves):.2f}%")
+        with col_m3:
+            st.metric("Max |Move|", f"{max(abs_moves):.2f}%")
+
+        # Detail Table
+        with st.expander("📋 Detailed Per-Earnings Results", expanded=False):
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+    st.stop()
 
 # ─── Main Area ──────────────────────────────────────────────────────────────
 

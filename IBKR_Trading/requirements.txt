@@ -3,6 +3,8 @@ ib_insync
 pandas_ta
 scipy
 plotly
+yfinance
+lxml
 python-dotenv
 groq
 watchdog
