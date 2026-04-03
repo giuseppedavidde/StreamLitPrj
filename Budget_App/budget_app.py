@@ -536,47 +536,81 @@ if not df.empty:
         with c_details:
             st.subheader("📋 Dettaglio Spese")
 
-            # Per la TABELLA includiamo anche i valori negativi (Rimborsi/Storni)
-            # Filter != 0 (escludiamo solo gli zero assoluti)
-            table_data = expenses_only[expenses_only != 0]
+            tab_mese, tab_periodo = st.tabs(["Mese Selezionato", f"Periodo ({selected_time_window} mesi)" if selected_time_window != "All" else "Tutto lo storico"])
 
-            # Ordina spese (dal più costoso al più "negativo")
-            sorted_expenses = table_data.sort_values(ascending=False).to_frame(
-                name="Importo"
-            )
+            with tab_mese:
+                # Per la TABELLA includiamo anche i valori negativi (Rimborsi/Storni)
+                # Filter != 0 (escludiamo solo gli zero assoluti)
+                table_data = expenses_only[expenses_only != 0]
 
-            # Usa la somma delle spese POSITIVE come denominatore per la %
-            # Questo permette di avere % sensate per le spese vere, e % negative per i rimborsi (es. -10% rispetto allo speso)
-            total_positive_expenses = expenses_only[expenses_only > 0].sum()
-
-            if total_positive_expenses > 0:
-                sorted_expenses["%"] = (
-                    sorted_expenses["Importo"] / total_positive_expenses * 100
-                ).astype(float).round(1).astype(str) + "%"
-            else:
-                sorted_expenses["%"] = "0%"
-
-            # Top 5 Voci (Spese più alte)
-            st.write("**Top 5 Voci**")
-            st.dataframe(
-                sorted_expenses.head(5).style.format({"Importo": "€ {:,.2f}"}),
-                width="stretch",
-                height=250,
-            )
-
-            # Altre Spese & Rimborsi (tutto il resto)
-            if len(sorted_expenses) > 5:
-                # Se ci sono valori negativi spesso finiscono in fondo
-                has_negatives = (sorted_expenses["Importo"] < 0).any()
-                label_expander = (
-                    "🔍 Altre Spese e Rimborsi" if has_negatives else "🔍 Altre Spese"
+                # Ordina spese (dal più costoso al più "negativo")
+                sorted_expenses = table_data.sort_values(ascending=False).to_frame(
+                    name="Importo"
                 )
 
-                with st.expander(label_expander):
-                    st.dataframe(
-                        sorted_expenses.iloc[5:].style.format({"Importo": "€ {:,.2f}"}),
-                        width="stretch",
+                # Usa la somma delle spese POSITIVE come denominatore per la %
+                # Questo permette di avere % sensate per le spese vere, e % negative per i rimborsi (es. -10% rispetto allo speso)
+                total_positive_expenses = expenses_only[expenses_only > 0].sum()
+
+                if total_positive_expenses > 0:
+                    sorted_expenses["%"] = (
+                        sorted_expenses["Importo"] / total_positive_expenses * 100
+                    ).astype(float).round(1).astype(str) + "%"
+                else:
+                    sorted_expenses["%"] = "0%"
+
+                # Top 5 Voci (Spese più alte)
+                st.write("**Top 5 Voci**")
+                st.dataframe(
+                    sorted_expenses.head(5).style.format({"Importo": "€ {:,.2f}"}),
+                    width="stretch",
+                    height=250,
+                )
+
+                # Altre Spese & Rimborsi (tutto il resto)
+                if len(sorted_expenses) > 5:
+                    # Se ci sono valori negativi spesso finiscono in fondo
+                    has_negatives = (sorted_expenses["Importo"] < 0).any()
+                    label_expander = (
+                        "🔍 Altre Spese e Rimborsi" if has_negatives else "🔍 Altre Spese"
                     )
+
+                    with st.expander(label_expander):
+                        st.dataframe(
+                            sorted_expenses.iloc[5:].style.format({"Importo": "€ {:,.2f}"}),
+                            width="stretch",
+                        )
+
+            with tab_periodo:
+                # Calcoli per il periodo selezionato usando df_trend
+                period_expenses_sum = df_trend[expense_cols].sum()
+                period_expenses_mean = df_trend[expense_cols].mean()
+                
+                period_table_data = period_expenses_sum[period_expenses_sum != 0]
+                
+                sorted_period = period_table_data.sort_values(ascending=False).to_frame(name="Totale")
+                sorted_period["Media Mensile"] = period_expenses_mean[sorted_period.index]
+                
+                total_positive_period = period_expenses_sum[period_expenses_sum > 0].sum()
+                
+                if total_positive_period > 0:
+                    sorted_period["% Incidenza"] = (sorted_period["Totale"] / total_positive_period * 100).astype(float).round(1).astype(str) + "%"
+                else:
+                    sorted_period["% Incidenza"] = "0%"
+                
+                # Ordina colonne: Totale, Media Mensile, % Incidenza
+                sorted_period = sorted_period[["Totale", "Media Mensile", "% Incidenza"]]
+
+                st.write(f"**Analisi su {len(df_trend)} mensilità**")
+                
+                st.dataframe(
+                    sorted_period.style.format({
+                        "Totale": "€ {:,.2f}",
+                        "Media Mensile": "€ {:,.2f}"
+                    }),
+                    width="stretch",
+                    height=400,
+                )
 
         st.divider()
 
