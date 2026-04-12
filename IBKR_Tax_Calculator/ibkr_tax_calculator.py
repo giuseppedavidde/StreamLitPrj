@@ -9,6 +9,7 @@ import os
 import datetime
 
 from dotenv import load_dotenv
+from ecb_fx import fetch_usdeur_range, fetch_usdeur_for_date
 
 load_dotenv()
 
@@ -25,6 +26,102 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "parsed_data" not in st.session_state:
     st.session_state.parsed_data = None
+# Cache for ECB FX rates: maps date -> USD/EUR rate (USD per 1 EUR)
+if "fx_cache" not in st.session_state:
+    st.session_state.fx_cache = {}
+
+
+# ─── ECB FX helpers ─────────────────────────────────────────────────────────
+
+def _get_cached_rate(trade_date: datetime.date) -> float:
+    """Return cached USD/EUR rate for a date, or 1.0 as fallback."""
+    cache = st.session_state.fx_cache
+    if trade_date in cache:
+        return cache[trade_date]
+    # Fallback: look for the most recent prior date in cache
+    prior = [d for d in cache if d <= trade_date]
+    if prior:
+        return cache[max(prior)]
+    return 1.0  # should not happen after enrich step
+
+
+def enrich_trades_with_eur(data: dict) -> None:
+    """Batch-fetch ECB USD/EUR rates for all unique trade dates and add EUR columns.
+
+    Modifies `data['trades']` in-place, adding:
+      - fx_rate        : USD/EUR rate used (USD per 1 EUR)
+      - fx_rate_date   : actual ECB publication date for the rate
+      - realized_pl_eur: realized_pl converted to EUR
+      - commission_eur : commission converted to EUR
+      - proceeds_eur   : proceeds converted to EUR
+      - cost_basis_eur : cost_basis converted to EUR
+
+    For trades already in EUR (currency != 'USD') the rate is set to 1.0.
+    """
+    trades = data.get("trades", [])
+    if not trades:
+        return
+
+    # Collect all unique dates where currency is USD
+    usd_dates = set()
+    for t in trades:
+        if t.get("currency", "USD") == "USD":
+            try:
+                dt = datetime.date.fromisoformat(str(t["datetime"])[:10])
+                usd_dates.add(dt)
+            except ValueError:
+                pass
+
+    # Single bulk API call for the full date range
+    if usd_dates:
+        min_date = min(usd_dates)
+        max_date = max(usd_dates)
+        # Extend window a bit to cover weekends/holidays at the edges
+        min_date -= datetime.timedelta(days=10)
+        rates_map = fetch_usdeur_range(min_date, max_date)
+        # Sort dates so we can do forward-fill for non-trading days
+        sorted_dates = sorted(rates_map.keys())
+        date_to_rate = {}
+        for d in sorted(usd_dates):
+            # find nearest prior date in rates_map
+            candidates = [rd for rd in sorted_dates if rd <= d]
+            if candidates:
+                chosen = max(candidates)
+                date_to_rate[d] = (rates_map[chosen], chosen)
+            else:
+                date_to_rate[d] = (1.0, d)  # fallback
+        # Persist into session cache
+        for d, (rate, _) in date_to_rate.items():
+            st.session_state.fx_cache[d] = rate
+    else:
+        date_to_rate = {}
+
+    # Annotate each trade
+    for t in trades:
+        currency = t.get("currency", "USD")
+        if currency != "USD":
+            t["fx_rate"] = 1.0
+            t["fx_rate_date"] = None
+            t["realized_pl_eur"] = t["realized_pl"]
+            t["commission_eur"] = t["commission"]
+            t["proceeds_eur"] = t["proceeds"]
+            t["cost_basis_eur"] = t["cost_basis"]
+            continue
+        try:
+            dt = datetime.date.fromisoformat(str(t["datetime"])[:10])
+        except ValueError:
+            dt = None
+        if dt and dt in date_to_rate:
+            rate, rate_date = date_to_rate[dt]
+        else:
+            rate, rate_date = 1.0, None
+        t["fx_rate"] = rate
+        t["fx_rate_date"] = rate_date
+        # Convert: USD_amount / (USD per EUR) = EUR_amount
+        t["realized_pl_eur"] = t["realized_pl"] / rate if rate else t["realized_pl"]
+        t["commission_eur"] = t["commission"] / rate if rate else t["commission"]
+        t["proceeds_eur"] = t["proceeds"] / rate if rate else t["proceeds"]
+        t["cost_basis_eur"] = t["cost_basis"] / rate if rate else t["cost_basis"]
 
 
 # ─── CSV Parser ─────────────────────────────────────────────────────────────
@@ -227,15 +324,19 @@ def _build_tax_context(data: dict) -> str:
         for r in rl:
             lines.append(f"  {r['asset_type']} | {r['symbol']}: Realized={r['realized_total']:+.2f} | Unrealized={r['unrealized_total']:+.2f} | Total={r['total']:+.2f}")
 
-    # Trades
+    # Trades — show both USD original and EUR converted values
     trades = data.get("trades", [])
     if trades:
-        lines.append(f"\n═══ TRADES ({len(trades)} total) ═══")
+        lines.append(f"\n═══ TRADES ({len(trades)} total) — P/L converted to EUR using ECB rates ═══")
         for t in trades:
             side = "BUY" if t["quantity"] > 0 else "SELL"
+            pl_eur = t.get("realized_pl_eur", t["realized_pl"])
+            fx = t.get("fx_rate", 1.0)
+            comm_eur = t.get("commission_eur", t["commission"])
             lines.append(
                 f"  {t['datetime']} | {side} {abs(t['quantity']):.4f} {t['symbol']} @ {t['price']:.4f} {t['currency']} | "
-                f"P/L Realized={t['realized_pl']:+.2f} | Comm={t['commission']:.2f} | Code={t['code']}"
+                f"P/L={t['realized_pl']:+.2f} {t['currency']} ({pl_eur:+.2f} EUR @ {fx:.4f}) | "
+                f"Comm={t['commission']:.2f} {t['currency']} ({comm_eur:.2f} EUR) | Code={t['code']}"
             )
 
     # Open Positions
@@ -309,6 +410,11 @@ uploaded_file = st.sidebar.file_uploader("Carica rendiconto IBKR (CSV)", type=["
 
 if uploaded_file:
     data = parse_ibkr_csv(uploaded_file)
+    # Reset FX cache when a new file is loaded
+    st.session_state.fx_cache = {}
+    with st.sidebar:
+        with st.spinner("🌐 Fetching ECB USD/EUR exchange rates…"):
+            enrich_trades_with_eur(data)
     st.session_state.parsed_data = data
 
 # AI Model Selection
@@ -508,6 +614,12 @@ with tab_trades:
         st.info("Nessun trade trovato nel rendiconto.")
     else:
         trades_df = pd.DataFrame(trades)
+        # Ensure EUR columns exist (may be missing if enrich wasn't called yet)
+        if "realized_pl_eur" not in trades_df.columns:
+            trades_df["realized_pl_eur"] = trades_df["realized_pl"]
+            trades_df["commission_eur"] = trades_df["commission"]
+            trades_df["proceeds_eur"] = trades_df["proceeds"]
+            trades_df["fx_rate"] = 1.0
 
         # Filters
         col_f1, col_f2, col_f3 = st.columns(3)
@@ -530,58 +642,71 @@ with tab_trades:
         elif filter_side == "SELL":
             filtered = filtered[filtered["quantity"] < 0]
 
-        # Summary metrics
-        total_realized = filtered["realized_pl"].sum()
-        total_comm = filtered["commission"].sum()
+        # Summary metrics — USE EUR converted values
+        total_realized_eur = filtered["realized_pl_eur"].sum()
+        total_realized_usd = filtered["realized_pl"].sum()
+        total_comm_eur = filtered["commission_eur"].sum()
         n_trades = len(filtered)
-        winning = len(filtered[filtered["realized_pl"] > 0])
-        losing = len(filtered[filtered["realized_pl"] < 0])
+        winning = len(filtered[filtered["realized_pl_eur"] > 0])
+        losing = len(filtered[filtered["realized_pl_eur"] < 0])
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Trade Totali", n_trades)
-        c2.metric("P/L Realizzato", f"€{total_realized:+,.2f}")
-        c3.metric("Commissioni", f"€{total_comm:,.2f}")
+        c2.metric("P/L Realizzato (EUR)", f"€{total_realized_eur:+,.2f}",
+                  help=f"Convertito da {total_realized_usd:+,.2f} USD usando i tassi ECB del giorno del trade")
+        c3.metric("Commissioni (EUR)", f"€{total_comm_eur:,.2f}")
         c4.metric("Win/Loss", f"{winning}W / {losing}L")
 
-        # Trade table
-        display_df = filtered[["datetime", "asset_type", "symbol", "currency", "quantity", "price", "proceeds", "commission", "realized_pl", "mtm_pl", "code"]].copy()
-        display_df.columns = ["Data/Ora", "Tipo", "Simbolo", "Val.", "Qtà", "Prezzo", "Ricavo", "Comm.", "P/L Real.", "P/L MTM", "Codice"]
+        # Trade table — show both USD original and EUR converted P/L
+        display_cols = ["datetime", "asset_type", "symbol", "currency", "quantity",
+                        "price", "proceeds_eur", "commission_eur", "realized_pl",
+                        "realized_pl_eur", "fx_rate", "mtm_pl", "code"]
+        display_df = filtered[display_cols].copy()
+        display_df.columns = ["Data/Ora", "Tipo", "Simbolo", "Val.", "Qtà", "Prezzo",
+                               "Ricavo (EUR)", "Comm. (EUR)", "P/L Real. (USD)",
+                               "P/L Real. (EUR)", "Tasso ECB", "P/L MTM", "Codice"]
 
         st.dataframe(
             display_df.style.format({
                 "Qtà": "{:,.4f}",
                 "Prezzo": "{:,.4f}",
-                "Ricavo": "€{:,.2f}",
-                "Comm.": "€{:,.2f}",
-                "P/L Real.": "€{:+,.2f}",
-                "P/L MTM": "€{:+,.2f}",
+                "Ricavo (EUR)": "€{:,.2f}",
+                "Comm. (EUR)": "€{:,.2f}",
+                "P/L Real. (USD)": "{:+,.2f} $",
+                "P/L Real. (EUR)": "€{:+,.2f}",
+                "Tasso ECB": "{:.4f}",
+                "P/L MTM": "{:+,.2f}",
             }).map(
-                lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0 else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0 else "",
-                subset=["P/L Real."]
+                lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0
+                          else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0
+                          else "",
+                subset=["P/L Real. (EUR)"]
             ),
             use_container_width=True,
             hide_index=True,
             height=500,
         )
 
-        # Timeline chart
-        st.subheader("P/L Realizzato nel Tempo")
-        realized_trades = filtered[filtered["realized_pl"] != 0].copy()
+        st.caption("💱 La colonna **Tasso ECB** riporta il tasso di cambio USD/EUR ufficiale BCE del giorno del trade (USD per 1 EUR). Il P/L in USD è diviso per questo tasso per ottenere il P/L in EUR.")
+
+        # Timeline chart — cumulative EUR P/L
+        st.subheader("P/L Realizzato nel Tempo (EUR)")
+        realized_trades = filtered[filtered["realized_pl_eur"] != 0].copy()
         if not realized_trades.empty:
             realized_trades["date"] = pd.to_datetime(realized_trades["datetime"].str[:10])
-            daily_pl = realized_trades.groupby("date")["realized_pl"].sum().cumsum().reset_index()
-            daily_pl.columns = ["Data", "P/L Cumulativo"]
+            daily_pl = realized_trades.groupby("date")["realized_pl_eur"].sum().cumsum().reset_index()
+            daily_pl.columns = ["Data", "P/L Cumulativo (EUR)"]
             fig_timeline = go.Figure()
             fig_timeline.add_trace(go.Scatter(
                 x=daily_pl["Data"],
-                y=daily_pl["P/L Cumulativo"],
+                y=daily_pl["P/L Cumulativo (EUR)"],
                 mode="lines+markers",
                 fill="tozeroy",
                 line=dict(color="#3498db", width=2),
                 fillcolor="rgba(52,152,219,0.1)",
             ))
             fig_timeline.update_layout(
-                title="P/L Realizzato Cumulativo",
+                title="P/L Realizzato Cumulativo (EUR — tassi ECB giornalieri)",
                 xaxis_title="Data",
                 yaxis_title="EUR",
                 height=400,
@@ -645,104 +770,298 @@ with tab_positions:
 with tab_fiscal:
     st.subheader("🏛️ Riepilogo Fiscale Anno")
 
+    # ── P/L totals from trades (USD → EUR via ECB daily rates) ───────────────
+    trades_all = data.get("trades", [])
+    trades_eur_df = pd.DataFrame(trades_all) if trades_all else pd.DataFrame()
+    if not trades_eur_df.empty and "realized_pl_eur" in trades_eur_df.columns:
+        total_realized_trades_eur = trades_eur_df["realized_pl_eur"].sum()
+        total_comm_trades_eur = trades_eur_df["commission_eur"].sum()
+        has_fx_conversion = True
+    else:
+        total_realized_trades_eur = None
+        total_comm_trades_eur = None
+        has_fx_conversion = False
+
     rl = data.get("realized_unrealized", [])
     if rl:
         rl_df = pd.DataFrame(rl)
 
-        # Separate by asset type
-        total_realized = rl_df["realized_total"].sum()
+        total_realized = rl_df["realized_total"].sum()      # from IBKR summary (may be USD)
         total_unrealized = rl_df["unrealized_total"].sum()
         total_realized_profit = rl_df["realized_profit_st"].sum() + rl_df["realized_profit_lt"].sum()
         total_realized_loss = rl_df["realized_loss_st"].sum() + rl_df["realized_loss_lt"].sum()
 
         st.markdown("### Riepilogo Generale")
+
+        if has_fx_conversion:
+            st.info(
+                "💱 **Conversione USD → EUR attiva** (tassi BCE ufficiali giornalieri). "
+                "Le imposte qui sotto sono calcolate sul **P/L convertito in EUR** usando "
+                "il tasso BCE del giorno di ogni singola operazione."
+            )
+            net_taxable = total_realized_trades_eur
+            net_taxable_label = "P/L Realizzato Netto (EUR, tassi ECB)"
+        else:
+            st.warning("⚠️ Dati FX non disponibili — i valori sono in valuta originale del trade.")
+            net_taxable = total_realized
+            net_taxable_label = "P/L Realizzato Netto (valuta originale)"
+
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("✅ P/L Realizzato Totale", f"€{total_realized:+,.2f}")
-        col2.metric("📈 Profitti Realizzati", f"€{total_realized_profit:,.2f}")
-        col3.metric("📉 Perdite Realizzate", f"€{total_realized_loss:,.2f}")
+        col1.metric("✅ P/L Realizzato EUR", f"€{net_taxable:+,.2f}",
+                    help="Somma dei P/L realizzati di tutti i trade, convertiti in EUR al tasso ECB del giorno" if has_fx_conversion else None)
+        col2.metric("📈 Profitti Lordi (IBKR)", f"€{total_realized_profit:,.2f}")
+        col3.metric("📉 Perdite Lorde (IBKR)", f"€{total_realized_loss:,.2f}")
         col4.metric("⏳ P/L Non Realizzato", f"€{total_unrealized:+,.2f}")
 
-        # Tax calculations
+        # ── Austrian KESt split by §27 Abs.3 vs §27 Abs.4 ──────────────────
         st.markdown("---")
-        st.markdown("### Calcolo Imposte")
+        st.markdown("### 🇦🇹 Finanzonline — Modulo E1kv (KESt 27.5%)")
+        st.info(
+            "⚖️ La legge austriaca (§ 27 EStG) richiede che **profitti e perdite siano inseriti "
+            "SEPARATAMENTE** (nicht saldiert) e che vengano distinti per categoria:\n\n"
+            "- **§ 27 Abs. 3** → Azioni, ETF, Fondi → KZ **994** (Überschüsse) + KZ **892** (Verluste)\n"
+            "- **§ 27 Abs. 4** → Derivati, Opzioni, Certificati → KZ **995** (Überschüsse) + KZ **896** (Verluste)"
+        )
 
-        # Austria KESt 27.5%
-        kest_rate = 0.275
-        # Italy 26%
-        it_rate = 0.26
+        if has_fx_conversion and not trades_eur_df.empty:
 
-        # Net realized = profits + losses (losses offset profits)
-        net_taxable = total_realized
-        kest_due = max(net_taxable * kest_rate, 0) if net_taxable > 0 else 0
-        it_tax_due = max(net_taxable * it_rate, 0) if net_taxable > 0 else 0
+            # ── Classify trades by Austrian tax category ─────────────────────
+            # IBKR asset_type strings (Italian UI): map to tax category
+            DERIVATE_KEYWORDS = [
+                "opzion", "option", "derivat", "future", "warrant",
+                "certificat", "cfd", "swap",
+            ]
 
-        commissions_total = abs(data["nav_change"].get("Commissioni", 0))
-        other_fees = abs(data["nav_change"].get("Altre commissioni", 0))
+            def _classify_at(asset_type: str) -> str:
+                """Return 'derivate' or 'aktien' based on IBKR asset_type string."""
+                at_lower = str(asset_type).lower()
+                if any(k in at_lower for k in DERIVATE_KEYWORDS):
+                    return "derivate"
+                return "aktien"
 
-        colA, colB = st.columns(2)
-        with colA:
-            st.markdown("#### 🇦🇹 Austria (KESt 27.5%)")
+            t_df = trades_eur_df.copy()
+            t_df["at_category"] = t_df["asset_type"].apply(_classify_at)
+
+            # Filter only closed trades (realized P/L ≠ 0)
+            t_closed = t_df[t_df["realized_pl_eur"] != 0].copy()
+
+            for cat, label_it, label_de, kz_profit, kz_loss, par in [
+                ("aktien",  "📈 Azioni / ETF / Fondi",       "§ 27 Abs. 3 EStG",  994, 892, 3),
+                ("derivate","⚡ Derivati / Opzioni / Futures","§ 27 Abs. 4 EStG",  995, 896, 4),
+            ]:
+                cat_df = t_closed[t_closed["at_category"] == cat]
+
+                gross_profit = cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
+                gross_loss   = cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum()  # negative
+                net          = gross_profit + gross_loss
+                kest_net     = max(net, 0) * 0.275   # KeSt on NET gain; 0 if net loss
+                n            = len(cat_df)
+
+                st.markdown(f"#### {label_it} — *{label_de}*")
+                if n == 0:
+                    st.caption(f"Nessun trade chiuso in questa categoria ({cat}).")
+                    continue
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    st.markdown(f"""
+| Campo Finanzonline | KZ | Importo EUR |
+|---|---|---|
+| Überschüsse 27,5% *(profitti lordi)* | **{kz_profit}** | **€ {gross_profit:,.2f}** |
+| Verluste *(perdite lorde, con segno -)* | **{kz_loss}** | **€ {gross_loss:,.2f}** |
+| Netto (solo informativo, NON da inserire) | — | € {net:+,.2f} |
+| KeSt stimata sul netto (27.5%) | — | € {kest_net:,.2f} |
+""")
+                with col_r:
+                    # Mini metric cards
+                    st.metric(f"KZ {kz_profit} — Überschüsse", f"€ {gross_profit:,.2f}",
+                              help=f"Inserire in Finanzonline → E1kv → KZ {kz_profit}")
+                    st.metric(f"KZ {kz_loss} — Verluste", f"€ {gross_loss:,.2f}",
+                              help=f"Inserire con segno NEGATIVO in Finanzonline → E1kv → KZ {kz_loss}")
+
+                st.caption(
+                    f"⚠️ **N.B.:** Inserire KZ {kz_profit} e KZ {kz_loss} **separatamente** (nicht saldiert). "
+                    f"Non sommarli. Operazioni incluse: {n}."
+                )
+                st.markdown("")
+
+        else:
+            kest_rate = 0.275
+            kest_due  = max(net_taxable * kest_rate, 0) if net_taxable > 0 else 0
             st.markdown(f"""
-            | Voce | Importo |
-            |------|---------|
-            | P/L Realizzato Netto | €{net_taxable:+,.2f} |
-            | KESt dovuta (27.5%) | €{kest_due:,.2f} |
-            | Commissioni (deducibili) | €{commissions_total:,.2f} |
-            | Altre commissioni | €{other_fees:,.2f} |
-            """)
+| Voce | Importo |
+|------|---------|
+| {net_taxable_label} | €{net_taxable:+,.2f} |
+| KESt stimata (27.5%) | **€{kest_due:,.2f}** |
+""")
 
-        with colB:
-            st.markdown("#### 🇮🇹 Italia (26%)")
-            st.markdown(f"""
-            | Voce | Importo |
-            |------|---------|
-            | P/L Realizzato Netto | €{net_taxable:+,.2f} |
-            | Imposta dovuta (26%) | €{it_tax_due:,.2f} |
-            | Commissioni (deducibili) | €{commissions_total:,.2f} |
-            | Altre commissioni | €{other_fees:,.2f} |
-            """)
 
-        # Detailed P/L per symbol
+
+        # ── Per-trade breakdown split by tax category ─────────────────────────
+        if has_fx_conversion and not trades_eur_df.empty:
+            st.markdown("---")
+            st.subheader("Dettaglio P/L per Operazione (EUR, tassi ECB giornalieri)")
+
+            # Prepare detail dataframe
+            detail_df = trades_eur_df.copy()
+            detail_df["data_operazione"] = detail_df["datetime"].str[:10]
+            detail_df["data_tasso_ecb"] = detail_df["fx_rate_date"].apply(
+                lambda d: str(d) if d is not None else ""
+            )
+            detail_df["tasso_leggibile"] = detail_df["fx_rate"].apply(
+                lambda r: f"1 EUR = {r:.4f} USD" if r and r != 1.0 else "N/A"
+            )
+            detail_df["tasso_inverso"] = detail_df["fx_rate"].apply(
+                lambda r: f"1 USD = {1/r:.4f} EUR" if r and r != 1.0 else "N/A"
+            )
+
+            # Reuse the same classification from the E1kv section above
+            DERIVATE_KEYWORDS = [
+                "opzion", "option", "derivat", "future", "warrant",
+                "certificat", "cfd", "swap",
+            ]
+            def _classify(at: str) -> str:
+                return "derivate" if any(k in str(at).lower() for k in DERIVATE_KEYWORDS) else "aktien"
+
+            detail_df["at_category"] = detail_df["asset_type"].apply(_classify)
+
+            # Only closed trades
+            detail_closed = detail_df[detail_df["realized_pl_eur"] != 0].copy()
+
+            _FMT = {
+                "Qtà": "{:,.4f}",
+                "Prezzo": "{:,.4f}",
+                "P/L (USD)": "{:+,.2f} $",
+                "P/L (EUR)": "€{:+,.2f}",
+                "Comm. (EUR)": "€{:,.2f}",
+            }
+
+            for cat, emoji, label_it, label_de, kz_profit, kz_loss in [
+                ("aktien",  "📈", "Azioni / ETF / Fondi",        "§ 27 Abs. 3 EStG", 994, 892),
+                ("derivate","⚡", "Derivati / Opzioni / Futures", "§ 27 Abs. 4 EStG", 995, 896),
+            ]:
+                cat_rows = detail_closed[detail_closed["at_category"] == cat].sort_values(
+                    ["data_operazione", "symbol"]
+                )
+
+                gross_profit = cat_rows[cat_rows["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
+                gross_loss   = cat_rows[cat_rows["realized_pl_eur"] < 0]["realized_pl_eur"].sum()
+                net          = gross_profit + gross_loss
+
+                st.markdown(f"#### {emoji} {label_it} — *{label_de}*")
+
+                if cat_rows.empty:
+                    st.caption("Nessuna operazione chiusa in questa categoria.")
+                    continue
+
+                # Build display dataframe
+                disp = cat_rows[[
+                    "data_operazione", "symbol", "asset_type", "currency",
+                    "quantity", "price",
+                    "realized_pl", "tasso_leggibile", "tasso_inverso", "data_tasso_ecb",
+                    "realized_pl_eur", "commission_eur",
+                ]].copy()
+                disp.columns = [
+                    "Giorno Operazione", "Simbolo", "Tipo", "Val.",
+                    "Qtà", "Prezzo",
+                    "P/L (USD)", "Cambio BCE (÷)", "Cambio BCE (×)", "Data Tasso ECB",
+                    "P/L (EUR)", "Comm. (EUR)",
+                ]
+
+                st.dataframe(
+                    disp.style.format(_FMT).map(
+                        lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0
+                                  else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0
+                                  else "",
+                        subset=["P/L (EUR)"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(500, max(150, len(disp) * 38)),
+                )
+
+                # Totals row — must match the KZ values in the E1kv section above
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric(
+                    f"✅ KZ {kz_profit} Überschüsse",
+                    f"€ {gross_profit:,.2f}",
+                    help=f"Somma profitti lordi → inserire in Finanzonline KZ {kz_profit}",
+                )
+                c2.metric(
+                    f"🔴 KZ {kz_loss} Verluste",
+                    f"€ {gross_loss:,.2f}",
+                    help=f"Somma perdite lorde (negativo) → inserire in Finanzonline KZ {kz_loss}",
+                )
+                c3.metric(
+                    "Netto (info)",
+                    f"€ {net:+,.2f}",
+                    help="Solo informativo — non corrisponde a nessun campo Finanzonline",
+                )
+                c4.metric(
+                    "KeSt stimata sul netto (27.5%)",
+                    f"€ {max(net, 0) * 0.275:,.2f}",
+                    help="KeSt = max(Netto, 0) × 27.5%  — se il netto è negativo la KeSt è 0",
+                )
+                st.markdown("")  # spacer between categories
+
+            st.caption(
+                "📐 **Formula:** P/L (EUR) = P/L (USD) ÷ tasso BCE  "
+                "→ **Cambio BCE (÷)** = divisore (es. *1 EUR = 1.0850 USD*) | "
+                "**Cambio BCE (×)** = reciproco (es. *1 USD = 0.9216 EUR*).  "
+                "I totali KZ mostrati qui sotto ogni tabella corrispondono esattamente a quelli "
+                "del riepilogo Finanzonline E1kv qui sopra."
+            )
+
+            # Bar chart aggregated by symbol (overview)
+            sym_eur = (
+                trades_eur_df[trades_eur_df["realized_pl_eur"] != 0]
+                .groupby("symbol")
+                .agg(pl_eur=("realized_pl_eur", "sum"))
+                .reset_index()
+                .sort_values("pl_eur", ascending=True)
+            )
+            colors_sym = ["#2ecc71" if v >= 0 else "#e74c3c" for v in sym_eur["pl_eur"]]
+            fig_sym = go.Figure(go.Bar(
+                x=sym_eur["pl_eur"],
+                y=sym_eur["symbol"],
+                orientation="h",
+                marker_color=colors_sym,
+                text=[f"€{v:+,.2f}" for v in sym_eur["pl_eur"]],
+                textposition="auto",
+            ))
+            fig_sym.update_layout(
+                title="P/L Realizzato per Simbolo (EUR — tassi ECB giornalieri)",
+                xaxis_title="EUR",
+                height=max(400, len(sym_eur) * 35),
+                margin=dict(l=180),
+            )
+            st.plotly_chart(fig_sym, use_container_width=True)
+
+        # ── IBKR Realized/Unrealized summary table ───────────────────────────
         st.markdown("---")
-        st.subheader("Dettaglio P/L per Simbolo (Realizzato + Non Realizzato)")
+        st.subheader("Dettaglio P/L IBKR per Simbolo (Realizzato + Non Realizzato)")
 
         display_rl = rl_df[["asset_type", "symbol", "realized_profit_st", "realized_loss_st", "realized_total", "unrealized_total", "total"]].copy()
         display_rl.columns = ["Tipo", "Simbolo", "Profitto S/T", "Perdita S/T", "Realizzato Tot.", "Non Real. Tot.", "Totale"]
 
         st.dataframe(
             display_rl.style.format({
-                "Profitto S/T": "€{:,.2f}",
-                "Perdita S/T": "€{:,.2f}",
-                "Realizzato Tot.": "€{:+,.2f}",
-                "Non Real. Tot.": "€{:+,.2f}",
-                "Totale": "€{:+,.2f}",
+                "Profitto S/T": "{:,.2f}",
+                "Perdita S/T": "{:,.2f}",
+                "Realizzato Tot.": "{:+,.2f}",
+                "Non Real. Tot.": "{:+,.2f}",
+                "Totale": "{:+,.2f}",
             }).map(
-                lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0 else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0 else "",
+                lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0
+                          else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0
+                          else "",
                 subset=["Realizzato Tot.", "Non Real. Tot.", "Totale"]
             ),
             use_container_width=True,
             hide_index=True,
         )
+        st.caption("⚠️ I valori in questa tabella provengono direttamente dal riepilogo IBKR e potrebbero essere in USD. Per i valori fiscalmente corretti in EUR usa la tabella sopra (tassi ECB giornalieri).")
 
-        # Realized P/L waterfall by symbol
-        realized_only = rl_df[rl_df["realized_total"] != 0].sort_values("realized_total", ascending=True)
-        if not realized_only.empty:
-            colors_rl = ["#2ecc71" if v >= 0 else "#e74c3c" for v in realized_only["realized_total"]]
-            fig_rl = go.Figure(go.Bar(
-                x=realized_only["realized_total"],
-                y=realized_only["symbol"],
-                orientation="h",
-                marker_color=colors_rl,
-                text=[f"€{v:+,.2f}" for v in realized_only["realized_total"]],
-                textposition="auto",
-            ))
-            fig_rl.update_layout(
-                title="P/L Realizzato per Simbolo",
-                xaxis_title="EUR",
-                height=max(400, len(realized_only) * 35),
-                margin=dict(l=180),
-            )
-            st.plotly_chart(fig_rl, use_container_width=True)
     else:
         st.info("Nessun dato P/L realizzato/non realizzato trovato.")
 

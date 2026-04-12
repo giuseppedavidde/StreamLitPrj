@@ -4,3 +4,4 @@
 *.pycache*
 *.DS_Store*
 *.md*
+*log*
