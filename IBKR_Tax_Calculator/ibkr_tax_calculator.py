@@ -7,6 +7,7 @@ import plotly.express as px
 import io
 import os
 import datetime
+from fpdf import FPDF
 
 from dotenv import load_dotenv
 from ecb_fx import fetch_usdeur_range, fetch_usdeur_for_date
@@ -29,6 +30,49 @@ if "parsed_data" not in st.session_state:
 # Cache for ECB FX rates: maps date -> USD/EUR rate (USD per 1 EUR)
 if "fx_cache" not in st.session_state:
     st.session_state.fx_cache = {}
+
+
+def create_pdf_report(report_data):
+    """
+    Generates a professional PDF report for fiscal summary.
+    """
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Title
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 15, "IBKR Tax Statement - Fiscal Summary", ln=True, align="C")
+    pdf.ln(5)
+    
+    # Subtitle
+    pdf.set_font("Arial", "I", 12)
+    pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align="C")
+    pdf.ln(10)
+    
+    # Section Header
+    pdf.set_font("Arial", "B", 14)
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(0, 10, "Summary Data", ln=True, fill=True)
+    pdf.ln(5)
+    
+    # Data Table
+    pdf.set_font("Arial", "", 11)
+    for key, value in report_data.items():
+        if isinstance(value, float):
+            val_str = f"{value:,.2f}"
+        else:
+            val_str = str(value)
+            
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(80, 8, f"{key}:", border="B")
+        pdf.set_font("Arial", "", 11)
+        pdf.cell(0, 8, val_str, border="B", ln=True, align="R")
+    
+    pdf.ln(20)
+    pdf.set_font("Arial", "I", 9)
+    pdf.multi_cell(0, 5, "Disclaimer: This report is automatically generated based on the provided IBKR CSV and ECB exchange rates. It is intended for informational purposes and should be reviewed by a qualified tax advisor before submission to official authorities.")
+    
+    return bytes(pdf.output())
 
 
 # ─── ECB FX helpers ─────────────────────────────────────────────────────────
@@ -1078,6 +1122,44 @@ with tab_fiscal:
             hide_index=True,
         )
         st.metric("Totale Versamenti", f"€{sum(d['amount'] for d in deps):,.2f}")
+
+    # ── Final Reporting Section ──────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📥 Esportazione Report Fiscale")
+    st.info("Genera un riepilogo in formato JSON o PDF dei campi KZ richiesti per Finanzonline.")
+    
+    # Aggregate data for reporting
+    report_dict = {
+        "Account": acc.get("Nome", "N/A"),
+        "Portfolio ID": acc.get("Conto", "N/A"),
+        "Base Currency": acc.get("Valuta di base", "EUR"),
+        "Report Date": datetime.date.today().strftime("%Y-%m-%d"),
+        "Net Realized P/L (EUR)": round(net_taxable, 2) if 'net_taxable' in locals() else 0.0,
+    }
+    
+    # Add KZ specific metrics if they exist
+    if 't_df' in locals() and not t_df.empty:
+        for cat, label, kz_p, kz_l in [("aktien", "Stocks/ETFs/Funds", 994, 892), ("derivate", "Derivatives/Options", 995, 896)]:
+            cat_df = t_closed[t_closed["at_category"] == cat]
+            report_dict[f"{label} - KZ {kz_p} (Profits)"] = round(cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum(), 2)
+            report_dict[f"{label} - KZ {kz_l} (Losses)"] = round(cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum(), 2)
+
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        st.download_button(
+            label="💾 Scarica Report JSON",
+            data=str(report_dict).replace("'", '"'),
+            file_name=f"IBKR_Tax_Report_{datetime.date.today()}.json",
+            mime="application/json"
+        )
+    with col_btn2:
+        pdf_data = create_pdf_report(report_dict)
+        st.download_button(
+            label="📄 Scarica Report PDF",
+            data=pdf_data,
+            file_name=f"IBKR_Tax_Report_{datetime.date.today()}.pdf",
+            mime="application/pdf"
+        )
 
 
 # ─── TAB 5: AI Assistant ────────────────────────────────────────────────────
