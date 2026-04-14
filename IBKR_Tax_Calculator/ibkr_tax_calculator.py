@@ -7,6 +7,7 @@ import plotly.express as px
 import io
 import os
 import datetime
+import json
 from fpdf import FPDF
 
 from dotenv import load_dotenv
@@ -1146,9 +1147,21 @@ with tab_fiscal:
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
+        # Convert all numeric values to standard float for JSON serialization
+        def clean_val(v):
+            try:
+                import numpy as np
+                if isinstance(v, (np.float64, np.float32, np.int64, np.int32)):
+                    return float(v)
+            except ImportError:
+                pass
+            return v
+            
+        json_ready_report = {k: clean_val(v) for k, v in report_dict.items()}
+        
         st.download_button(
             label="💾 Scarica Report JSON",
-            data=str(report_dict).replace("'", '"'),
+            data=json.dumps(json_ready_report, indent=4),
             file_name=f"IBKR_Tax_Report_{datetime.date.today()}.json",
             mime="application/json"
         )
