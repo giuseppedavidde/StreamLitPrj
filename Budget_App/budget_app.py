@@ -817,108 +817,70 @@ if not df.empty:
 
                 st.subheader("🔍 Revisione Categorizzazione")
 
-                # 1. REPORT VIEW (Read Only - Mobile Friendly)
-                with st.expander("📄 Vedi Report Dettagliato", expanded=True):
-                    st.markdown(report_md)
+                # Build editable view dataframe
+                target_cats = sorted(income_cols + expense_cols)
+                
+                edit_df = detailed_df[["Std_Date", "Std_Description", "Betrag_Float", "Analyzed_Category", "New_Category"]].copy()
+                edit_df.columns = ["Data", "Descrizione", "Importo €", "Categoria Originale", "Categoria AI"]
+                edit_df["🗑️ Elimina"] = False
+                # Truncate description for readability
+                edit_df["Descrizione"] = edit_df["Descrizione"].astype(str).str[:50]
 
-                # 2. EDITING SECTION
-                st.markdown("### 🛠️ Correzioni Rapide")
+                edited = st.data_editor(
+                    edit_df,
+                    column_config={
+                        "Data": st.column_config.TextColumn("📅 Data", disabled=True),
+                        "Descrizione": st.column_config.TextColumn("📝 Descrizione", disabled=True, width="large"),
+                        "Importo €": st.column_config.NumberColumn("💶 Importo", format="€ %.2f", disabled=True),
+                        "Categoria Originale": st.column_config.TextColumn("📁 Originale", disabled=True),
+                        "Categoria AI": st.column_config.SelectboxColumn(
+                            "🏷️ Categoria AI",
+                            options=target_cats,
+                            required=True,
+                            width="medium",
+                        ),
+                        "🗑️ Elimina": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="fixed",
+                    key="inline_category_editor",
+                    height=min(len(edit_df) * 35 + 60, 600),
+                )
 
-                # Create readable labels for the selectbox
-                # We use the dataframe index to track selection
-                def format_func(idx):
-                    row = detailed_df.loc[idx]
-                    date_str = str(row["Buchungsdatum"])
-                    desc = row["Umsatztext"][:25] + "..."
-                    amt = f"€{row['Betrag_Float']:.2f}"
-                    cat = row["New_Category"]
-                    return f"{date_str} | {amt} | {cat} | {desc}"
+                # Apply Changes button
+                if st.button("✅ Applica Modifiche", type="secondary", key="apply_inline_edits"):
+                    # 1. Apply category changes back to detailed_df
+                    for i, orig_idx in enumerate(detailed_df.index):
+                        new_cat = edited.iloc[i]["Categoria AI"]
+                        if new_cat and new_cat in target_cats:
+                            detailed_df.at[orig_idx, "New_Category"] = new_cat
 
-                # Filter out deleted rows if any (though we usually drop them from DF)
-                valid_indices = detailed_df.index.tolist()
+                    # 2. Remove rows marked for deletion
+                    rows_to_delete = edited[edited["🗑️ Elimina"] == True].index.tolist()
+                    if rows_to_delete:
+                        orig_indices_to_drop = [detailed_df.index[i] for i in rows_to_delete]
+                        detailed_df = detailed_df.drop(orig_indices_to_drop)
 
-                if not valid_indices:
-                    st.info("Nessuna transazione disponibile.")
-                else:
-                    selected_idx = st.selectbox(
-                        "Seleziona transazione da modificare:",
-                        valid_indices,
-                        format_func=format_func,
-                        key="edit_transaction_select",
+                    # 3. Re-aggregate
+                    dummy_importer = BankImporter(None)
+                    new_agg = dummy_importer.aggregate_data(
+                        detailed_df, target_cats, income_cols
                     )
+                    new_rep = dummy_importer.generate_report(detailed_df)
 
-                    if selected_idx is not None:
-                        sel_row = detailed_df.loc[selected_idx]
+                    # 4. Save back to state
+                    st.session_state["import_results"]["detailed_df"] = detailed_df
+                    st.session_state["import_results"]["aggregated_df"] = new_agg
+                    st.session_state["import_results"]["report_md"] = new_rep
 
-                        col_edit_1, col_edit_2 = st.columns([2, 1])
-
-                        with col_edit_1:
-                            target_cats = sorted(income_cols + expense_cols)
-                            current_cat_idx = 0
-                            if sel_row["New_Category"] in target_cats:
-                                current_cat_idx = target_cats.index(
-                                    sel_row["New_Category"]
-                                )
-
-                            new_cat_manual = st.selectbox(
-                                "Modifica Categoria:",
-                                target_cats,
-                                index=current_cat_idx,
-                                key="manual_cat_picker",
-                            )
-
-                        # Actions
-                        col_btn_1, col_btn_2 = st.columns(2)
-
-                        if col_btn_1.button("✅ Aggiorna", type="secondary"):
-                            # Update DF
-                            detailed_df.at[selected_idx, "New_Category"] = (
-                                new_cat_manual
-                            )
-
-                            # Re-Calculate everything
-                            dummy_importer = BankImporter(None)
-                            new_agg = dummy_importer.aggregate_data(
-                                detailed_df, target_cats, income_cols
-                            )
-                            new_rep = dummy_importer.generate_report(detailed_df)
-
-                            # Save back to state
-                            st.session_state["import_results"][
-                                "detailed_df"
-                            ] = detailed_df
-                            st.session_state["import_results"][
-                                "aggregated_df"
-                            ] = new_agg
-                            st.session_state["import_results"]["report_md"] = new_rep
-
-                            st.toast("Categoria Aggiornata!")
-                            time.sleep(0.5)
-                            st.rerun()
-
-                        if col_btn_2.button("🗑️ Elimina Riga", type="primary"):
-                            # Delete row
-                            detailed_df = detailed_df.drop(selected_idx)
-
-                            # Re-Calculate everything
-                            dummy_importer = BankImporter(None)
-                            new_agg = dummy_importer.aggregate_data(
-                                detailed_df, target_cats, income_cols
-                            )
-                            new_rep = dummy_importer.generate_report(detailed_df)
-
-                            # Save back to state
-                            st.session_state["import_results"][
-                                "detailed_df"
-                            ] = detailed_df
-                            st.session_state["import_results"][
-                                "aggregated_df"
-                            ] = new_agg
-                            st.session_state["import_results"]["report_md"] = new_rep
-
-                            st.toast("Transazione Eliminata!")
-                            time.sleep(0.5)
-                            st.rerun()
+                    n_deleted = len(rows_to_delete)
+                    msg = "Categorie aggiornate!"
+                    if n_deleted > 0:
+                        msg += f" {n_deleted} righe eliminate."
+                    st.toast(msg, icon="✅")
+                    time.sleep(0.5)
+                    st.rerun()
 
                 st.divider()
                 st.subheader("📊 Totali Mensili (Anteprima)")

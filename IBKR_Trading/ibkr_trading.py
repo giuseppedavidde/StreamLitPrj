@@ -5,7 +5,7 @@ import traceback
 import os
 
 from ibkr_connector import IBKRConnector
-from technical_analysis import add_indicators, detect_patterns
+from technical_analysis import add_indicators, detect_patterns, get_holders_info, get_financial_info
 from option_utils import (
     compute_greeks_table,
     historical_volatility,
@@ -101,6 +101,35 @@ def _build_market_context() -> str:
     lines.append(f"RSI: {analysis.get('rsi', 'N/A')}")
     lines.append(f"Patterns: {', '.join(analysis.get('patterns', [])) or 'None'}")
     lines.append(f"Volume Spike: {analysis.get('volume_spike', False)}")
+
+    # Add holders info
+    holders = st.session_state.get("market_holders", {})
+    if holders.get("institutional_holders") or holders.get("etf_mutualfund_holders"):
+        lines.append("")
+        lines.append("── HOLDERS INFO (TOP 5) ──")
+        if holders.get("institutional_holders"):
+            lines.append("Institutions:")
+            for h in holders["institutional_holders"]:
+                lines.append(f"  - {h['Holder']}: {h['Shares']:,} shares ({h['pctHeld']*100:.2f}%)")
+        if holders.get("etf_mutualfund_holders"):
+            lines.append("ETFs/Mutual Funds:")
+            for h in holders["etf_mutualfund_holders"]:
+                lines.append(f"  - {h['Holder']}: {h['Shares']:,} shares ({h['pctHeld']*100:.2f}%)")
+
+    # Add financial info
+    financials = st.session_state.get("market_financials", {})
+    if financials:
+        lines.append("")
+        lines.append("── FINANCIAL FUNDAMENTALS ──")
+        for k, v in financials.items():
+            if isinstance(v, float):
+                # Formattiamo come percentuale se è un margine/ritorno o crescita
+                if any(x in k.lower() for x in ['margin', 'yield', 'return', 'growth']):
+                    lines.append(f"  {k}: {v*100:.2f}%")
+                else:
+                    lines.append(f"  {k}: {v:.2f}")
+            else:
+                lines.append(f"  {k}: {v}")
 
     # Last 10 bars summary (OHLCV table)
     lines.append("")
@@ -235,6 +264,45 @@ ISTRUZIONI:
         return f"❌ AI Error ({provider_type}/{model_name}): {e}"
 
 
+import yfinance as yf
+import pandas as pd
+
+def get_historical_data_with_fallback(connector, ticker, **kwargs):
+    df = None
+    data_source = "IBKR"
+    
+    sec_type = kwargs.get("sec_type", "STK")
+    duration = kwargs.get("duration", "6 M")
+    
+    try:
+        df = connector.get_historical_data(ticker, **kwargs)
+    except Exception as e:
+        print(f"IBKR fetch failed for {ticker}: {e}")
+
+    if (df is None or df.empty) and sec_type == "STK":
+        print(f"Attempting yfinance fallback for {ticker}")
+        try:
+            dur = duration.upper().replace(" ", "")
+            period_map = {"1M": "1mo", "3M": "3mo", "6M": "6mo", "1Y": "1y", "2Y": "2y", "5Y": "5y"}
+            p = period_map.get(dur, "6mo")
+            
+            yf_df = yf.download(ticker, period=p, progress=False)
+            if yf_df is not None and not yf_df.empty:
+                if isinstance(yf_df.columns, pd.MultiIndex):
+                    yf_df.columns = [col[0] for col in yf_df.columns]
+                
+                yf_df.columns = [c.lower() for c in yf_df.columns]
+                if 'date' not in yf_df.columns and yf_df.index.name in ('Date', 'date'):
+                    yf_df.index.name = 'date'
+                
+                df = yf_df
+                data_source = "YFinance Fallback"
+                print(f"✅ YFinance fallback successful for {ticker}")
+        except Exception as e:
+            print(f"yfinance fallback failed for {ticker}: {e}")
+            
+    return df, data_source
+
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
 st.sidebar.title("IBKR Connection")
@@ -268,10 +336,76 @@ st.sidebar.markdown(
 
 # Data Selection
 st.sidebar.title("Data Selection")
-ticker = st.sidebar.text_input("Ticker", "AAPL")
+ticker = st.sidebar.text_input("Ticker (for EU use YF format, e.g. IFX.DE)", "AAPL")
 sec_type = st.sidebar.selectbox("Security Type", ["STK", "OPT"])
 timeframe = st.sidebar.selectbox("Timeframe", ["1 hour", "5 mins", "1 day"])
 duration = st.sidebar.selectbox("Duration", ["1 D", "1 W", "1 M", "3 M", "6 M", "1 Y"])
+
+# ── Auto-clear stale data when ticker or sec_type changes ──
+_prev_ticker = st.session_state.get("_prev_ticker")
+_prev_sec_type = st.session_state.get("_prev_sec_type")
+
+if "archived_sessions" not in st.session_state:
+    st.session_state.archived_sessions = []
+
+if _prev_ticker is not None and (_prev_ticker != ticker or _prev_sec_type != sec_type):
+    # ── Archive current session before clearing ──
+    import datetime as _dt
+    _chat = st.session_state.get("chat_history", [])
+    _opt_chat = st.session_state.get("opt_strategies_chat", [])
+    _strategies = st.session_state.get("ai_strategies", [])
+    _meta = st.session_state.get("market_meta", {})
+    if _chat or _opt_chat or _strategies:
+        st.session_state.archived_sessions.insert(0, {
+            "ticker": _prev_ticker,
+            "sec_type": _prev_sec_type,
+            "timestamp": _dt.datetime.now().strftime("%H:%M:%S"),
+            "chat_history": list(_chat),
+            "opt_strategies_chat": list(_opt_chat),
+            "ai_strategies": list(_strategies),
+            "meta": dict(_meta),
+        })
+        # Keep only the last 10 sessions
+        st.session_state.archived_sessions = st.session_state.archived_sessions[:10]
+
+    # ── Clear ALL stale keys ──
+    stale_keys = [
+        "market_df", "market_analysis", "market_meta",
+        "market_holders", "market_financials",
+        "ai_strategies", "ai_metrics_matrix", "ai_strategies_model",
+        "chat_history", "needs_initial_analysis",
+        "underlying_df", "underlying_analysis",
+        "strategy_legs_data", "selected_strategy", "strategy_data_fetch",
+        "opt_cache_key", "opt_exps", "opt_strikes",
+        "opt_strategies_chat",
+        "opt_selected_expiry", "opt_selected_strike", "opt_selected_right",
+    ]
+    for k in stale_keys:
+        st.session_state.pop(k, None)
+    print(f"[CACHE] Archived & cleared: {_prev_ticker}/{_prev_sec_type} → {ticker}/{sec_type}")
+st.session_state["_prev_ticker"] = ticker
+st.session_state["_prev_sec_type"] = sec_type
+
+# ── Sidebar: Archived Sessions ──
+if st.session_state.get("archived_sessions"):
+    with st.sidebar.expander("📂 Archived Sessions", expanded=False):
+        for idx, sess in enumerate(st.session_state.archived_sessions):
+            label = f"{sess['ticker']} ({sess['sec_type']}) — {sess['timestamp']}"
+            n_msgs = len(sess.get("chat_history", [])) + len(sess.get("opt_strategies_chat", []))
+            n_strats = len(sess.get("ai_strategies", []))
+            st.markdown(f"**{label}**")
+            st.caption(f"💬 {n_msgs} messages · 📊 {n_strats} strategies")
+            if st.button(f"🔍 View", key=f"view_arch_{idx}"):
+                st.session_state[f"_show_archive_{idx}"] = not st.session_state.get(f"_show_archive_{idx}", False)
+            if st.session_state.get(f"_show_archive_{idx}", False):
+                for msg in sess.get("chat_history", []) + sess.get("opt_strategies_chat", []):
+                    role_icon = "🤖" if msg["role"] == "assistant" else "👤"
+                    content_preview = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
+                    st.markdown(f"{role_icon} {content_preview}")
+                if sess.get("ai_strategies"):
+                    for s in sess["ai_strategies"]:
+                        st.markdown(f"📊 **{s.get('name', 'N/A')}** — {s.get('direction', '')}")
+            st.markdown("---")
 
 # AI Model Selection
 if TraderAgent and AIProvider:
@@ -415,12 +549,15 @@ if view_mode == "🎡 Wheel Strategy Scanner":
                 for t in tickers:
                     try:
                         # Fetch short-term data to get Price, RSI, Trend
-                        df = st.session_state.connector.get_historical_data(
+                        df, _src = get_historical_data_with_fallback(
+                            st.session_state.connector,
                             ticker=t,
                             sec_type="STK",
                             duration="6 M",
-                            bar_size_setting="1 day",
+                            timeframe="1 day"
                         )
+                        if _src == 'YFinance Fallback':
+                            st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
                         if df is not None and not df.empty:
                             from technical_analysis import (
                                 add_indicators,
@@ -899,12 +1036,15 @@ if sec_type == "OPT":
                     ):
                         try:
                             # Fetch daily data for 1 Year specifically for accurate Historical Volatility (HV)
-                            und_df = st.session_state.connector.get_historical_data(
+                            und_df, _src = get_historical_data_with_fallback(
+                                st.session_state.connector,
                                 ticker,
                                 sec_type="STK",
                                 duration="1 Y",
                                 bar_size_setting="1 day",
                             )
+                            if _src == 'YFinance Fallback':
+                                st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
                             if und_df is not None and not und_df.empty:
                                 und_df = add_indicators(und_df)
                                 und_analysis = detect_patterns(und_df)
@@ -1019,7 +1159,25 @@ if sec_type == "OPT":
                                     provider_type=provider_type,
                                     model_name=model_name,
                                 )
-                                strategies = agent.suggest_option_strategy(
+                                
+                                # Fetch holders & financials for OPT (always fresh)
+                                m_holders = get_holders_info(ticker)
+                                m_fin = get_financial_info(ticker)
+                                st.session_state.market_holders = m_holders
+                                st.session_state.market_financials = m_fin
+                                
+                                # Costruisci il fundamentals_context da passare al TraderAgent
+                                f_ctx = "Nessun dato fondamentale/societario disponibile."
+                                if m_holders or m_fin:
+                                    f_ctx = "FUNDAMENTALS & HOLDERS:\n"
+                                    if m_fin:
+                                        f_ctx += "Dati Finanziari: " + ", ".join(f"{k}={v}" for k,v in m_fin.items()) + "\n"
+                                    if m_holders.get("institutional_holders"):
+                                        f_ctx += "Top Istituzioni: " + ", ".join(h['Holder'] for h in m_holders["institutional_holders"]) + "\n"
+                                    if m_holders.get("etf_mutualfund_holders"):
+                                        f_ctx += "Top ETF/Fondi: " + ", ".join(h['Holder'] for h in m_holders["etf_mutualfund_holders"]) + "\n"
+                                        
+                                strategies, metrics_matrix = agent.suggest_option_strategy(
                                     ticker=ticker,
                                     analysis=und_analysis,
                                     expirations=limited_exps,  # CRITICAL: Pass only the user-selected date
@@ -1028,11 +1186,14 @@ if sec_type == "OPT":
                                     time_horizon=time_horizon,
                                     greeks_table=greeks_table,
                                     iv=last_exp_iv,  # Give AI the latest Expiration IV we gathered
+                                    geopolitics_context=st.session_state.get("geo_events_input"),
+                                    fundamentals_context=f_ctx
                                 )
                                 for s in strategies:
                                     s["iv_used"] = last_exp_iv
                                     s["iv_data"] = last_exp_iv_data
                                 st.session_state["ai_strategies"] = strategies
+                                st.session_state["ai_metrics_matrix"] = metrics_matrix
                                 st.session_state["ai_strategies_model"] = (
                                     f"{provider_type}/{agent.ai.current_model_name}"
                                 )
@@ -1051,10 +1212,22 @@ if sec_type == "OPT":
                     and st.session_state["ai_strategies"]
                 ):
                     strategies = st.session_state["ai_strategies"]
+                    metrics_matrix = st.session_state.get("ai_metrics_matrix", [])
                     model_used = st.session_state.get("ai_strategies_model", "")
                     st.caption(
                         f"*🤖 Suggested by `{model_used}`*  |  *📚 Knowledge: `Fontanills Options`*"
                     )
+
+                    if metrics_matrix:
+                        st.markdown("### 📊 Underlying Evaluation Matrix")
+                        import pandas as pd
+                        df_metrics = pd.DataFrame(metrics_matrix)
+                        # Aggiungiamo un'icona alla colonna satisfied
+                        if 'satisfied' in df_metrics.columns:
+                            df_metrics['satisfied'] = df_metrics['satisfied'].apply(
+                                lambda x: f"✅ {x}" if "yes" in str(x).lower() else f"❌ {x}"
+                            )
+                        st.table(df_metrics)
 
                     for i, strat in enumerate(strategies):
                         prob = strat.get("probability", 50)
@@ -1303,12 +1476,15 @@ if sec_type == "OPT":
                             status_placeholder.info(
                                 f"📊 Fetching underlying stock {ticker}..."
                             )
-                            und_df = st.session_state.connector.get_historical_data(
+                            und_df, _src = get_historical_data_with_fallback(
+                                st.session_state.connector,
                                 ticker,
                                 sec_type="STK",
                                 duration=duration,
                                 bar_size_setting=timeframe,
                             )
+                            if _src == 'YFinance Fallback':
+                                st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
                             if und_df is not None and not und_df.empty:
                                 und_df = add_indicators(und_df)
                                 st.session_state.underlying_df = und_df
@@ -1323,8 +1499,6 @@ if sec_type == "OPT":
                                     f"⏳ Fetching Leg {leg_idx}: {leg_name}..."
                                 )
 
-                                # **CRITICAL**: IBKR does not provide long historical data for options (Error 162)
-                                # Requests for EODChart (e.g. 1 day bars) often fail for options without specific subscriptions.
                                 opt_duration = duration
                                 opt_timeframe = timeframe
 
@@ -1343,7 +1517,7 @@ if sec_type == "OPT":
                                 ):
                                     opt_duration = "1 M"
 
-                                leg_df = st.session_state.connector.get_historical_data(
+                                leg_df, _src = get_historical_data_with_fallback(st.session_state.connector, 
                                     ticker,
                                     sec_type="OPT",
                                     duration=opt_duration,  # Safe duration for options
@@ -1352,6 +1526,8 @@ if sec_type == "OPT":
                                     expiry=leg["expiry"],
                                     right=leg["right"],
                                 )
+                                if _src == 'YFinance Fallback':
+                                    st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
 
                                 leg_meta = {
                                     "leg_id": leg_idx,
@@ -1434,6 +1610,12 @@ if sec_type == "OPT" and (not expiry or not strike or not right):
 if st.button("Fetch Data & Analyze", disabled=not can_fetch):
     with st.spinner("Fetching historical data..."):
         try:
+            # Check if we are analyzing a new ticker and clear chat history if so
+            current_meta = st.session_state.get("market_meta", {})
+            if current_meta.get("ticker") != ticker:
+                st.session_state.chat_history = []
+                st.session_state.needs_initial_analysis = True
+
             # Clear previous underlying data
             st.session_state.pop("underlying_df", None)
             st.session_state.pop("underlying_analysis", None)
@@ -1442,12 +1624,14 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
             if sec_type == "OPT":
                 # 1. Fetch the UNDERLYING stock first (user's duration/timeframe)
                 with st.spinner(f"📊 Fetching {ticker} underlying stock data..."):
-                    und_df = st.session_state.connector.get_historical_data(
+                    und_df, _src = get_historical_data_with_fallback(st.session_state.connector, 
                         ticker,
                         sec_type="STK",
                         duration=duration,
                         bar_size_setting=timeframe,
                     )
+                    if _src == 'YFinance Fallback':
+                        st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
                     if und_df is not None and not und_df.empty:
                         und_df = add_indicators(und_df)
                         st.session_state.underlying_df = und_df
@@ -1461,13 +1645,15 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
                 fetch_duration = duration
                 fetch_timeframe = timeframe
 
-            df = st.session_state.connector.get_historical_data(
+            df, _src = get_historical_data_with_fallback(st.session_state.connector, 
                 ticker,
                 sec_type=sec_type,
                 duration=fetch_duration,
                 bar_size_setting=fetch_timeframe,
                 **opt_kwargs,
             )
+            if _src == 'YFinance Fallback':
+                st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
 
             if df is not None and not df.empty:
                 df = add_indicators(df)
@@ -1482,6 +1668,13 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
                     "duration": duration,
                     "sec_type": sec_type,
                 }
+                
+                # Fetch holders info
+                st.session_state.market_holders = get_holders_info(ticker)
+                
+                # Fetch financial info
+                st.session_state.market_financials = get_financial_info(ticker)
+                
                 # Reset chat and trigger initial analysis
                 st.session_state.chat_history = []
                 st.session_state.needs_initial_analysis = True
@@ -2027,6 +2220,32 @@ elif "market_df" in st.session_state:
     if not TraderAgent:
         st.info("AI Agent not available (agents module not found).")
     else:
+        # 🌍 Geopolitics Section
+        with st.expander("🌍 Geopolitical Risk Analysis", expanded=False):
+            st.write("Analyze the macro-geopolitical risk for this asset using institutional frameworks.")
+            col_geo1, col_geo2 = st.columns([2, 1])
+            with col_geo1:
+                geo_events = st.text_area("Recent News/Events (optional):", height=68, key="geo_events_input")
+            with col_geo2:
+                geo_framework = st.selectbox(
+                    "Framework:",
+                    ["Grand Chessboard (Brzezinski)", "Prisoners of Geography (Tim Marshall)", "World Order (Kissinger)"],
+                    key="geo_framework_sel"
+                )
+            
+            if st.button("Run Geopolitical Analysis", type="primary", key="btn_run_geo"):
+                with st.spinner(f"Analyzing {meta['ticker']} through {geo_framework}..."):
+                    geo_agent = TraderAgent(
+                        provider_type=st.session_state.get("ai_provider", "gemini"),
+                        model_name=st.session_state.get("ai_model_name"),
+                    )
+                    geo_response = geo_agent.analyze_geopolitical_risk(
+                        asset=meta['ticker'],
+                        current_events=geo_events if geo_events else "Nessun evento o notizia specifica fornita. Analizza il contesto geografico e strutturale generale.",
+                        framework=geo_framework
+                    )
+                    st.markdown(geo_response)
+
         # Auto-generate initial analysis on first fetch
         if st.session_state.get("needs_initial_analysis"):
             st.session_state.needs_initial_analysis = False

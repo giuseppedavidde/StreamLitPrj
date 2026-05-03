@@ -4,16 +4,27 @@ import json
 import random
 import pandas as pd
 from dotenv import load_dotenv
+import importlib
+import sys
 
 # Carica variabili d'ambiente
 load_dotenv()
 
 # Import AI Provider
 try:
+    import agents.ai_provider
+    importlib.reload(agents.ai_provider)
     from agents.ai_provider import AIProvider
 except ImportError as e:
     st.error(f"Modulo 'agents' non trovato o errore importazione: {e}")
     AIProvider = None
+
+try:
+    import agents.recipe_researcher
+    importlib.reload(agents.recipe_researcher)
+    from agents.recipe_researcher import RecipeResearcher
+except ImportError:
+    RecipeResearcher = None
 
 # Configurazione Pagina
 st.set_page_config(page_title="Gesundheit Dashboard", page_icon="🥗", layout="wide")
@@ -292,6 +303,90 @@ with tab_gen:
     training_days = st.multiselect("Giorni di Allenamento", GIORNI_LAVORATIVI, default=["Lunedì", "Mercoledì", "Venerdì"])
     user_prompt = st.text_area("Richieste personalizzate per l'AI", placeholder="Es. voglio pietanze estive")
     
+    st.markdown("### 🕵️‍♂️ Web Scraping Autonomo (OpenClaw)")
+    with st.expander("Naviga in Internet per nuove risorse tramite OpenClaw", expanded=False):
+        st.markdown("**Impostazioni OpenClaw**")
+        openclaw_model = st.text_input("Modello per OpenClaw", value="llama3.2", help="Verrà eseguito il comando: ollama launch openclaw --model <tuo_modello>")
+        use_wsl_openclaw = st.checkbox("Esegui all'interno di WSL", value=True, help="Simula l'apertura manuale della shell bash per permettere a WSL di caricare l'ambiente di ollama.")
+        st.divider()
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            btn_start_openclaw = st.button("Cerca Nuovi Ingredienti/Ricette", type="secondary")
+        with col2:
+            btn_test_openclaw = st.button("🔌 Test di Base OpenClaw", type="primary")
+
+        if btn_start_openclaw or btn_test_openclaw:
+            if RecipeResearcher is None:
+                st.error("Modulo RecipeResearcher non importato correttamente da Custom_Agents. Installa l'sdk openclaw.")
+            else:
+                with st.spinner("Inizializzazione OpenClaw... (Monitora il log per lo stato)"):
+                    try:
+                        log_expander = st.expander("📺 Live Browser Console", expanded=True)
+                        log_box = log_expander.empty()
+                        captured_logs = []
+                        
+                        def update_streamlit_log(line):
+                            captured_logs.append(line)
+                            display_text = "\n".join(captured_logs[-20:])
+                            log_box.code(display_text, language="bash")
+
+                        # Reinizializziamo tramite SDK python, ma indicando l'uso della CLI OpenClaw
+                        researcher = RecipeResearcher(model_name=openclaw_model, use_cli=True, use_wsl=use_wsl_openclaw, log_callback=update_streamlit_log)
+                        
+                        if btn_test_openclaw:
+                            res = researcher.test_agent(log_callback=update_streamlit_log)
+                            if res:
+                                st.success("✅ Test di Base OpenClaw Superato con Successo!")
+                                st.code(res)
+                            else:
+                                st.error("❌ Test Fallito. Controllare i log di Streamlit.")
+                        else:
+                            # passamo macro generici di stima per dare contesto al browser
+                            query_m = {"p": round(target_pro/3, 1), "c": round(target_cho/3, 1), "f": round(target_fat/3, 1)}
+                            res = researcher.search_recipe(
+                                macro_constraints=query_m, 
+                                custom_request=user_prompt, 
+                                log_callback=update_streamlit_log
+                            )
+                            
+                            if res:
+                                st.success(f"✅ Trovato: {res.get('titolo', 'Senza titolo')}")
+                                # Logica per aggiungere eventuali nuovi ingredienti db
+                                new_ingr = res.get("nuovi_ingredienti_trovati", [])
+                                if new_ingr:
+                                    added_count = 0
+                                    for ing in new_ingr:
+                                        # Semplice euristica macro per categoria
+                                        pro, cho, fat = ing.get("pro", 0), ing.get("cho", 0), ing.get("fat", 0)
+                                        cat = "protein"
+                                        if cho > pro and cho > fat: cat = "carb"
+                                        elif fat > pro and fat > cho: cat = "fat"
+                                        elif pro == 0 and cho == 0 and fat == 0: cat = "veggie"
+                                        
+                                        clean_name = ing.get("name", "Unknown AI")
+                                        if clean_name not in INGREDIENTS_DB:
+                                            INGREDIENTS_DB[clean_name] = {
+                                                "category": cat,
+                                                "kcal": ing.get("kcal", round(pro*4 + cho*4 + fat*9)),
+                                                "pro": pro, "cho": cho, "fat": fat
+                                            }
+                                            added_count += 1
+                                            
+                                    if added_count > 0:
+                                        try:
+                                            with open(INGREDIENTS_DB_FILE, "w") as f:
+                                                json.dump(INGREDIENTS_DB, f, indent=4)
+                                            st.info(f"💾 Salvati {added_count} nuovi ingredienti nel Database Locale!")
+                                        except Exception as e:
+                                            st.error(f"Errore di salvataggio DB: {e}")
+                                else:
+                                    st.info("Nessun nuovo ingrediente inserito (già presenti nel DB).")
+                                    
+                            else:
+                                st.warning("OpenClaw non ha restituito JSON valido o si è verificato un errore nel subprocesso.")
+                    except Exception as e:
+                        st.error(f"Errore critico durante l'avvio: {e}")
     st.markdown("### 🔢 Log Risoluzione Equazioni Lineari (Python)")
     with st.expander("Ispeziona Matrice Ingredienti Python", expanded=False):
         supp_keys = [k for k in SUPPLEMENTS.keys() if k != "Nessuno"]
