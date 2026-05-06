@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import traceback
 import os
+import subprocess
+import shutil
 
 from ibkr_connector import IBKRConnector
 from technical_analysis import add_indicators, detect_patterns, get_holders_info, get_financial_info
@@ -305,34 +307,96 @@ def get_historical_data_with_fallback(connector, ticker, **kwargs):
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
-st.sidebar.title("IBKR Connection")
-host = st.sidebar.text_input("Host", "127.0.0.1")
-port = st.sidebar.number_input("Port", value=7497, step=1)
-client_id = st.sidebar.number_input("Client ID", value=1, step=1)
+# ── IBKR Gateway Launcher ──
+st.sidebar.title("IBKR Gateway")
 
-col1, col2 = st.sidebar.columns(2)
-with col1:
+# Detect ib-gw binary
+_IB_GW_PATH = shutil.which("ib-gw") or "/usr/bin/ib-gw"
+_ib_gw_available = os.path.isfile(_IB_GW_PATH) and os.access(_IB_GW_PATH, os.X_OK)
+
+# Trading mode selector — determines the port automatically
+trading_mode = st.sidebar.radio(
+    "Trading Mode",
+    ["📄 Paper Trading", "💰 Normal Trading"],
+    index=0,
+    horizontal=True,
+    help="Paper Trading uses port 7497, Normal Trading uses port 7496.",
+)
+_is_paper = trading_mode.startswith("📄")
+_auto_port = 7497 if _is_paper else 7496
+
+# Gateway process status helper
+def _is_gw_running() -> bool:
+    """Check if an IB Gateway (ibgateway.GWClient) process is currently running."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "ibgateway.GWClient"],
+            capture_output=True, timeout=3,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+# Show gateway status
+_gw_running = _is_gw_running()
+if _gw_running:
+    st.sidebar.markdown("**Gateway:** 🟢 Running")
+else:
+    st.sidebar.markdown("**Gateway:** ⚫ Not running")
+
+# Launch / Stop buttons
+_gw_col1, _gw_col2 = st.sidebar.columns(2)
+with _gw_col1:
+    if st.button("🚀 Launch GW", width="stretch", disabled=not _ib_gw_available or _gw_running):
+        try:
+            proc = subprocess.Popen(
+                [_IB_GW_PATH],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,  # Detach from Streamlit process
+            )
+            st.session_state["_gw_pid"] = proc.pid
+            st.toast(f"IB Gateway launched (PID {proc.pid}). Please enter your credentials in the Gateway window.", icon="🚀")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to launch IB Gateway: {e}")
+with _gw_col2:
+    if st.button("⏹️ Stop GW", width="stretch", disabled=not _gw_running):
+        try:
+            subprocess.run(["pkill", "-f", "ibgateway.GWClient"], timeout=5)
+            st.session_state.pop("_gw_pid", None)
+            st.toast("IB Gateway stopped.", icon="⏹️")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to stop IB Gateway: {e}")
+
+if not _ib_gw_available:
+    st.sidebar.caption(f"⚠️ `ib-gw` not found at `{_IB_GW_PATH}`")
+
+# ── API Connection (uses auto-port from trading mode) ──
+_conn_col1, _conn_col2 = st.sidebar.columns(2)
+with _conn_col1:
     if st.button("Connect", width="stretch"):
         try:
-            st.session_state.connector.connect(host, port, client_id)
+            st.session_state.connector.connect("127.0.0.1", _auto_port, 1)
             st.session_state.pop("opt_cache_key", None)
             st.rerun()
         except Exception as e:
             print(f"[ERROR] Connection failed: {type(e).__name__}: {e}")
             traceback.print_exc()
             st.error(f"Connection Failed: {e}")
-with col2:
+with _conn_col2:
     if st.button("Disconnect", width="stretch"):
         st.session_state.connector.disconnect()
         for k in ["opt_exps", "opt_strikes", "opt_cache_key"]:
             st.session_state.pop(k, None)
         st.rerun()
 
-# Show connection status
 is_connected = st.session_state.connector.connected
 st.sidebar.markdown(
-    f"**Status:** {'🟢 Connected' if is_connected else '🔴 Disconnected'}"
+    f"**API:** {'🟢 Connected' if is_connected else '🔴 Disconnected'} · Port `{_auto_port}`"
 )
+st.sidebar.markdown("---")
 
 # Data Selection
 st.sidebar.title("Data Selection")

@@ -1,19 +1,31 @@
 import asyncio
 import logging
 
-# Ensure an event loop exists BEFORE importing ib_insync.
-# ib_insync's dependency (eventkit) calls get_event_loop() at module level.
+# Ensure an event loop exists BEFORE importing ib_async.
+# ib_async's dependency (eventkit) calls get_event_loop() at module level.
 # In Streamlit's ScriptRunner thread, no event loop exists by default.
 try:
     asyncio.get_event_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-import nest_asyncio
+import sys
+
+# On Python 3.14+, nest_asyncio 1.6.0 is broken (RuntimeError: Timeout should
+# be used inside a task).  We force the maintained fork (nest_asyncio2) into
+# sys.modules so that *every* library (including ib_async internals) that does
+# "import nest_asyncio" will transparently get the fixed version.
+try:
+    import nest_asyncio2 as _na2  # type: ignore[import-untyped]
+
+    sys.modules["nest_asyncio"] = _na2
+    nest_asyncio = _na2
+except ImportError:
+    import nest_asyncio  # fallback for envs where nest_asyncio2 isn't installed
 
 nest_asyncio.apply()
 
-from ib_insync import (
+from ib_async import (
     IB,
     Stock,
     Option,
@@ -27,7 +39,7 @@ import pandas as pd
 
 
 class _IBKRInfoFilter(logging.Filter):
-    """Filter out purely informational IBKR error codes from ib_insync logs.
+    """Filter out purely informational IBKR error codes from ib_async logs.
 
     Error 10091 = "Market data farm connection is OK" / delayed data notice.
     Error 10089 = "Not a valid firmquote" (informational).
@@ -45,13 +57,13 @@ class _IBKRInfoFilter(logging.Filter):
         return True
 
 
-# Apply filter to the ib_insync logger and its children
-_ib_logger = logging.getLogger("ib_insync")
+# Apply filter to the ib_async logger and its children
+_ib_logger = logging.getLogger("ib_async")
 _ib_logger.addFilter(_IBKRInfoFilter())
 
 
 class IBKRConnector:
-    """Connector for Interactive Brokers via ib_insync.
+    """Connector for Interactive Brokers via ib_async.
 
     Handles the event-loop mismatch caused by Streamlit's ScriptRunner thread:
     after st.rerun(), the thread may have a NEW event loop, but the IB socket
@@ -86,9 +98,9 @@ class IBKRConnector:
         )
 
     def _patch_wrapper_error(self):
-        """Monkey-patch ib_insync's internal EWrapper.error to suppress Error 10091/10089.
+        """Monkey-patch ib_async's internal EWrapper.error to suppress Error 10091/10089.
 
-        ib_insync routes TWS error messages from the EClient socket directly to
+        ib_async routes TWS error messages from the EClient socket directly to
         the wrapper's error() method, which then prints to stderr, bypassing the
         Python logging module entirely.  We wrap that method here to intercept and
         drop purely informational codes before they appear in the Streamlit log.
@@ -140,7 +152,7 @@ class IBKRConnector:
             # Patch the internal EWrapper.error to suppress Error 10091.
             # This error ("market data requires additional subscription") is purely
             # informational — TWS still delivers delayed data. Without this patch
-            # ib_insync prints the raw error string directly via its EClient loop,
+            # ib_async prints the raw error string directly via its EClient loop,
             # bypassing Python logging entirely.
             self._patch_wrapper_error()
         except TimeoutError:

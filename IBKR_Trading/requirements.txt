@@ -1,6 +1,7 @@
 streamlit
-ib_insync
-pandas_ta
+ib-async
+nest-asyncio2
+ta
 scipy
 plotly
 yfinance

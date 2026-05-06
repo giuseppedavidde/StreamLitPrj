@@ -1,6 +1,6 @@
 """
 Option utilities — Black-Scholes Greeks + Historical Volatility.
-Uses scipy.stats.norm (available via pandas_ta dependency).
+Uses scipy.stats.norm for cumulative/probability density functions.
 """
 
 import math

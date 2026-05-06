@@ -1,5 +1,8 @@
 import pandas as pd
-import pandas_ta as ta
+from ta.momentum import RSIIndicator, StochasticOscillator, WilliamsRIndicator
+from ta.trend import SMAIndicator, EMAIndicator, MACD, ADXIndicator, CCIIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import VolumeWeightedAveragePrice, OnBalanceVolumeIndicator
 import yfinance as yf
 
 
@@ -96,19 +99,26 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # MOMENTUM INDICATORS
     # ==========================
     try:
-        df["RSI_14"] = ta.rsi(df["close"], length=14)
+        rsi = RSIIndicator(close=df["close"], window=14)
+        df["RSI_14"] = rsi.rsi()
     except Exception as e:
         print(f"RSI calculation failed: {e}")
 
     try:
-        stoch = ta.stoch(df["high"], df["low"], df["close"], k=14, d=3, smooth_k=3)
-        if stoch is not None:
-            df = pd.concat([df, stoch], axis=1)  # STOCHk_14_3_3, STOCHd_14_3_3
+        stoch = StochasticOscillator(
+            high=df["high"], low=df["low"], close=df["close"],
+            window=14, smooth_window=3
+        )
+        df["STOCHk_14_3_3"] = stoch.stoch()
+        df["STOCHd_14_3_3"] = stoch.stoch_signal()
     except Exception as e:
         print(f"Stochastic calculation failed: {e}")
 
     try:
-        df["WILLR_14"] = ta.willr(df["high"], df["low"], df["close"], length=14)
+        willr = WilliamsRIndicator(
+            high=df["high"], low=df["low"], close=df["close"], lbp=14
+        )
+        df["WILLR_14"] = willr.williams_r()
     except Exception as e:
         print(f"Williams %R calculation failed: {e}")
 
@@ -116,35 +126,38 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # TREND INDICATORS
     # ==========================
     try:
-        df["SMA_20"] = ta.sma(df["close"], length=20)
-        df["SMA_50"] = ta.sma(df["close"], length=50)
-        df["SMA_200"] = ta.sma(df["close"], length=200)
+        df["SMA_20"] = SMAIndicator(close=df["close"], window=20).sma_indicator()
+        df["SMA_50"] = SMAIndicator(close=df["close"], window=50).sma_indicator()
+        df["SMA_200"] = SMAIndicator(close=df["close"], window=200).sma_indicator()
     except Exception as e:
         print(f"SMA calculation failed: {e}")
 
     try:
-        df["EMA_20"] = ta.ema(df["close"], length=20)
-        df["EMA_50"] = ta.ema(df["close"], length=50)
-        df["EMA_200"] = ta.ema(df["close"], length=200)
+        df["EMA_20"] = EMAIndicator(close=df["close"], window=20).ema_indicator()
+        df["EMA_50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
+        df["EMA_200"] = EMAIndicator(close=df["close"], window=200).ema_indicator()
     except Exception as e:
         print(f"EMA calculation failed: {e}")
 
     try:
-        macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-        if macd is not None:
-            df = pd.concat([df, macd], axis=1)  # MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
+        macd = MACD(close=df["close"], window_fast=12, window_slow=26, window_sign=9)
+        df["MACD_12_26_9"] = macd.macd()
+        df["MACDh_12_26_9"] = macd.macd_diff()
+        df["MACDs_12_26_9"] = macd.macd_signal()
     except Exception as e:
         print(f"MACD calculation failed: {e}")
 
     try:
-        adx = ta.adx(df["high"], df["low"], df["close"], length=14)
-        if adx is not None:
-            df = pd.concat([df, adx], axis=1)  # ADX_14, DMP_14, DMN_14
+        adx = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
+        df["ADX_14"] = adx.adx()
+        df["DMP_14"] = adx.adx_pos()
+        df["DMN_14"] = adx.adx_neg()
     except Exception as e:
         print(f"ADX calculation failed: {e}")
 
     try:
-        df["CCI_14"] = ta.cci(df["high"], df["low"], df["close"], length=14)
+        cci = CCIIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
+        df["CCI_14"] = cci.cci()
     except Exception as e:
         print(f"CCI calculation failed: {e}")
 
@@ -152,16 +165,16 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # VOLATILITY INDICATORS
     # ==========================
     try:
-        bbands = ta.bbands(df["close"], length=20, std=2)
-        if bbands is not None:
-            df = pd.concat([df, bbands], axis=1)  # BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
+        bbands = BollingerBands(close=df["close"], window=20, window_dev=2)
+        df["BBL_20_2.0"] = bbands.bollinger_lband()
+        df["BBM_20_2.0"] = bbands.bollinger_mavg()
+        df["BBU_20_2.0"] = bbands.bollinger_hband()
     except Exception as e:
         print(f"Bollinger Bands calculation failed: {e}")
 
     try:
-        atr = ta.atr(df["high"], df["low"], df["close"], length=14)
-        if atr is not None:
-            df["ATR_14"] = atr
+        atr = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=14)
+        df["ATR_14"] = atr.average_true_range()
     except Exception as e:
         print(f"ATR calculation failed: {e}")
 
@@ -169,12 +182,16 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # VOLUME INDICATORS
     # ==========================
     try:
-        df["VWAP"] = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+        vwap = VolumeWeightedAveragePrice(
+            high=df["high"], low=df["low"], close=df["close"], volume=df["volume"]
+        )
+        df["VWAP"] = vwap.volume_weighted_average_price()
     except Exception as e:
         print(f"VWAP calculation failed: {e}")
 
     try:
-        df["OBV"] = ta.obv(df["close"], df["volume"])
+        obv = OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"])
+        df["OBV"] = obv.on_balance_volume()
     except Exception as e:
         print(f"OBV calculation failed: {e}")
 
