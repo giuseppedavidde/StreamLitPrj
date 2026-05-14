@@ -73,134 +73,13 @@ def plot_price_chart(ticker_symbol):
 
 st.sidebar.header("🧠 Cervello AI")
 
-
-# --- FUNZIONE HELPER PER LE CHIAVI ---
-def get_secret_key(key_name):
-    """Cerca la chiave prima nei secrets di Streamlit, poi nell'ambiente locale."""
-    try:
-        # Tenta di leggere da .streamlit/secrets.toml (o Secrets su Cloud)
-        if key_name in st.secrets:
-            return st.secrets[key_name]
-    except (FileNotFoundError, KeyError):
-        pass
-    # Fallback su variabili d'ambiente (.env locale)
-    return os.getenv(key_name)
-
-
-# Selezione Provider
-provider_options = [
-    "Google Gemini",
-    "Groq (Veloce)",
-    "DeepSeek (Economico)",
-    "Ollama (Locale)",
-]
-# Usiamo index=0 (Gemini) come default
-provider_selection = st.sidebar.radio("Scegli Provider:", provider_options, index=0)
-
 api_key = None
 selected_model = None
 provider_code = "gemini"
 
-
-# Logica specifica per ogni provider
-# Wrapper Caching per Streamlit (evita chiamate API ad ogni rerun)
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_gemini_models(api_key):
-    return AIProvider.get_gemini_models(api_key)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_groq_models(api_key):
-    return AIProvider.get_groq_models(api_key)
-
-
-if "Gemini" in provider_selection:
-    provider_code = "gemini"
-    env_key = get_secret_key("GOOGLE_API_KEY")  # <--- MODIFICATO
-    user_key = st.sidebar.text_input(
-        "Gemini API Key", value=env_key or "", type="password"
-    )
-    api_key = user_key if user_key else None
-
-    if api_key:
-        try:
-            gemini_models = get_cached_gemini_models(api_key)
-            if gemini_models:
-                # Trova indice default solo se non c'è già una selezione nello state
-                # Ma st.selectbox gestisce lo stato se la lista è stabile (che ora è cacheata)
-                default_ix = 0
-                for i, m in enumerate(gemini_models):
-                    if "1.5-flash" in m and "latest" not in m:
-                        default_ix = i
-                        break
-
-                # Usa key univoca per persistenza
-                selected_model = st.sidebar.selectbox(
-                    "Scegli Modello Gemini:",
-                    gemini_models,
-                    index=default_ix,
-                    key="gemini_model_select",
-                )
-            else:
-                st.sidebar.warning("Nessun modello Gemini trovato o Key invalida.")
-        except Exception as e:
-            st.sidebar.error(f"Errore recupero modelli: {e}")
-
-elif "Groq" in provider_selection:
-    provider_code = "groq"
-    env_key = get_secret_key("GROQ_API_KEY")  # <--- MODIFICATO
-    user_key = st.sidebar.text_input(
-        "Groq API Key", value=env_key or "", type="password"
-    )
-    api_key = user_key if user_key else None
-
-    if api_key:
-        try:
-            groq_models = get_cached_groq_models(api_key)
-            if groq_models:
-                # Default a llama-3 se c'è
-                default_ix = 0
-                for i, m in enumerate(groq_models):
-                    if "llama-3.3" in m:
-                        default_ix = i
-                        break
-                selected_model = st.sidebar.selectbox(
-                    "Scegli Modello Groq:",
-                    groq_models,
-                    index=default_ix,
-                    key="groq_model_select",
-                )
-            else:
-                st.sidebar.warning("Nessun modello Groq trovato.")
-        except Exception:
-            st.sidebar.caption("Err lista modelli.")
-
-elif "DeepSeek" in provider_selection:
-    provider_code = "deepseek"
-    selected_model = "deepseek-chat"
-    env_key = get_secret_key("DEEPSEEK_API_KEY")  # <--- MODIFICATO
-    user_key = st.sidebar.text_input(
-        "DeepSeek API Key", value=env_key or "", type="password"
-    )
-    api_key = user_key if user_key else None
-
-elif "Ollama" in provider_selection:
-    provider_code = "ollama"
-    if OLLAMA_INSTALLED:
-        # Recupero dinamico dei modelli
-        local_models = get_ollama_models_list()
-
-        if local_models:
-            selected_model = st.sidebar.selectbox(
-                "Scegli Modello Locale:", local_models
-            )
-            st.sidebar.success(f"Pronto: {selected_model}")
-        else:
-            st.sidebar.error("Nessun modello trovato o Ollama spento.")
-            st.sidebar.info("1. Assicurati che Ollama sia in esecuzione.")
-            st.sidebar.info("2. Esegui `ollama pull llama3` nel terminale.")
-    else:
-        st.sidebar.error("Libreria 'ollama' mancante.")
+if AIProvider:
+    provider_code, selected_model = AIProvider.render_streamlit_sidebar()
+    # L'API key verrà letta automaticamente dalle variabili d'ambiente (impostate in render_streamlit_sidebar)
 
 # --- GESTIONE CACHE ---
 with st.sidebar.expander("🗑️ Gestione Cache", expanded=False):

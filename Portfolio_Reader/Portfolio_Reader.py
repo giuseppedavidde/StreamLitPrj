@@ -38,69 +38,14 @@ DATA_FILE = "My_Portfolio.csv"
 # --- 1. SIDEBAR: AI CONFIGURATION ---
 st.sidebar.header("🤖 Configurazione AI")
 with st.sidebar.expander("Settings AI", expanded=False):
-    supported_providers = (
-        AIProvider.get_supported_providers() if AIProvider else ["Gemini", "Ollama"]
-    )
-    provider_type = st.selectbox("Provider", supported_providers, index=0)
-
-    api_key = None
-    model_name = None
-
-    if provider_type == "Gemini":
-        # Recupera API Key da Env o Input
-        env_key = os.getenv("GOOGLE_API_KEY")
-        api_key = st.text_input(
-            "Gemini API Key",
-            value=env_key if env_key else "",
-            type="password",
-            help="Se presente nel file .env verra' caricata automaticamente",
-        )
-
-        # Recupera lista modelli da AIProvider
-        if AIProvider:
-            try:
-                gemini_models = AIProvider.get_gemini_models(api_key=api_key or env_key)
-            except Exception as e:
-                st.error(f"Errore recupero modelli Gemini: {e}")
-                gemini_models = AIProvider.FALLBACK_ORDER
-
-            if not gemini_models:
-                gemini_models = AIProvider.FALLBACK_ORDER
-        else:
-            gemini_models = ["gemini-pro"]
-
-        model_name = st.selectbox("Modello", gemini_models, index=0)
-    elif provider_type == "Groq":
-        # Recupera API Key da Env o Input
-        env_key = os.getenv("GROQ_API_KEY")
-        api_key = st.text_input(
-            "Groq API Key",
-            value=env_key if env_key else "",
-            type="password",
-            help="Se presente nel file .env verra' caricata automaticamente",
-        )
-
-        if AIProvider:
-            groq_models = AIProvider.get_groq_models(api_key=env_key)
-            model_name = st.selectbox("Modello", groq_models, index=0)
-    else:
-        # Ollama
-        if AIProvider:
-            ollama_models = AIProvider.get_ollama_models()
-            if ollama_models:
-                model_name = st.selectbox("Modello Locale", ollama_models, index=0)
-            else:
-                st.warning("Nessun modello Ollama trovato o Ollama non in esecuzione.")
-                model_name = st.text_input("Nome Modello Manuale", value="llama3")
-
-    # Inizializza Provider nel Session State
-    if st.button("Applica Configurazione AI"):
-        if AIProvider:
+    if AIProvider:
+        provider, model = AIProvider.render_streamlit_sidebar()
+        if st.button("Applica Configurazione AI"):
             try:
                 st.session_state["ai_provider"] = AIProvider(
-                    api_key=api_key, provider_type=provider_type, model_name=model_name
+                    provider_type=provider, model_name=model
                 )
-                st.toast(f"AI Attivata: {provider_type} ({model_name})", icon="🟢")
+                st.toast(f"AI Attivata: {provider} ({model})", icon="🟢")
             except Exception as e:
                 st.error(f"Errore Init AI: {e}")
 

@@ -77,7 +77,11 @@ class IBKRConnector:
         self.connected = False
         # Save the event loop that IB will use for its socket I/O.
         # This is the loop active when the connector is created.
-        self._loop = asyncio.get_event_loop()
+        try:
+            self._loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
         # Suppress noisy informational errors — Error 10091 is emitted by TWS
         # whenever delayed data is used instead of real-time. It's not a failure;
         # data still arrives correctly. We log it at DEBUG level only.

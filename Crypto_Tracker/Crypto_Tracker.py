@@ -44,130 +44,22 @@ st.caption(
 # --- 0. SIDEBAR: AI CONFIGURATION ---
 st.sidebar.header("🤖 Configurazione AI")
 with st.sidebar.expander("Settings AI", expanded=False):
-    supported_providers = (
-        AIProvider.get_supported_providers() if AIProvider else ["Gemini", "Ollama"]
-    )
-    
-    provider_type = st.selectbox(
-        "Provider",
-        supported_providers,
-        format_func=lambda x: (
-            "☁️ Gemini (Cloud)"
-            if x.lower() == "gemini"
-            else "🖥️ Ollama (Local)"
-            if x.lower() == "ollama"
-            else "⚡ Groq (LPU Cloud)"
-            if x.lower() == "groq"
-            else "🧠 Puter Free (Claude/Gemini)"
-        ),
-    )
-    # Rendi minuscolo per standardizzare
-    provider_type = provider_type.lower()
-
-    api_key = None
-    model_name = None
-
-    if provider_type == "gemini":
-        # Recupera API Key da Env o Input
-        env_key = os.getenv("GOOGLE_API_KEY")
-        api_key = st.text_input(
-            "Gemini API Key",
-            value=env_key if env_key else "",
-            type="password",
-            help="Se presente nel file .env verra' caricata automaticamente",
-        )
-
-        if AIProvider:
+    if AIProvider:
+        provider, model = AIProvider.render_streamlit_sidebar()
+        if st.button("Applica Configurazione AI"):
             try:
-                gemini_models = AIProvider.get_gemini_models(api_key=api_key or env_key)
-            except Exception as e:
-                st.error(f"Errore recupero modelli Gemini: {e}")
-                gemini_models = AIProvider.FALLBACK_ORDER
-            if not gemini_models:
-                gemini_models = AIProvider.FALLBACK_ORDER
-        else:
-            gemini_models = ["gemini-pro"]
-
-        model_name = st.selectbox("Modello", gemini_models, index=0)
-        
-    elif provider_type == "groq":
-        # Recupera API Key da Env o Input
-        env_key = os.getenv("GROQ_API_KEY")
-        api_key = st.text_input(
-            "Groq API Key",
-            value=env_key if env_key else "",
-            type="password",
-            help="Se presente nel file .env verra' caricata automaticamente",
-        )
-
-        if AIProvider:
-            try:
-                groq_models = AIProvider.get_groq_models(api_key=api_key or env_key)
-            except Exception as e:
-                st.error(f"Errore recupero modelli Groq: {e}")
-                groq_models = []
-            
-            if groq_models:
-                model_name = st.selectbox("Modello", groq_models, index=0)
-            else:
-                st.warning("Nessun modello trovato. Controlla la API Key.")
-                
-    elif provider_type == "puter":
-        # Puter / Claude Free API
-        puter_key = os.getenv("PUTER_API_KEY")
-        api_key = st.text_input(
-            "Puter Auth Token",
-            value=puter_key if puter_key else "",
-            type="password",
-            help="Prendi il token da puter.com -> Settings.",
-        )
-        if api_key:
-            os.environ["PUTER_API_KEY"] = api_key
-            
-        if AIProvider:
-            try:
-                puter_models = AIProvider.get_puter_models()
-                if puter_models:
-                    model_name = st.selectbox("Modello (Puter)", puter_models, index=0)
-                else:
-                    st.warning("Nessun modello trovato. Controlla il Token.")
-            except Exception as e:
-                st.error(f"Errore recupero modelli Puter: {e}")
-                
-    else:  # Assumiamo ollama
-        if AIProvider:
-            try:
-                ollama_models = AIProvider.get_ollama_models()
-                if ollama_models:
-                    model_name = st.selectbox("Modello Locale", ollama_models, index=0)
-                else:
-                    st.warning("Nessun modello Ollama trovato o Ollama non in esecuzione.")
-                    model_name = st.text_input("Nome Modello Manuale", value="llama3")
-            except Exception as e:
-                st.error(f"Errore connessione ad Ollama: {e}")
-                model_name = st.text_input("Nome Modello Manuale", value="llama3")
-
-    # Inizializza Provider nel Session State
-    if st.button("Applica Configurazione AI"):
-        if AIProvider:
-            try:
-                # Forza variabili d'ambiente per fallback interni
-                if api_key:
-                    os.environ["GOOGLE_API_KEY"] = api_key
-                    os.environ["GROQ_API_KEY"] = api_key
-
                 st.session_state["ai_provider"] = AIProvider(
-                    api_key=api_key, provider_type=provider_type, model_name=model_name
+                    provider_type=provider, model_name=model
                 )
                 
                 if TraderAgent:
                     st.session_state["trader_agent"] = TraderAgent(
-                        provider_type=provider_type, model_name=model_name
+                        provider_type=provider, model_name=model
                     )
                     # Hack: passiamo direttamente l'istanza configurata all'agente per sicurezza
                     st.session_state["trader_agent"].ai = st.session_state["ai_provider"]
 
-                st.toast(f"AI Attivata: {provider_type} ({model_name})", icon="🟢")
+                st.toast(f"AI Attivata: {provider} ({model})", icon="🟢")
             except Exception as e:
                 st.error(f"Errore Init AI: {e}")
 

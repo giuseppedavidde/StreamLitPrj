@@ -465,69 +465,9 @@ if uploaded_file:
 # AI Model Selection
 if TraderAgent and AIProvider:
     st.sidebar.markdown("---")
-    st.sidebar.title("🤖 AI Model")
-    supported_providers = AIProvider.get_supported_providers()
-    ai_provider = st.sidebar.selectbox(
-        "Provider",
-        supported_providers,
-        format_func=lambda x: {
-            "gemini": "☁️ Gemini (Cloud)",
-            "ollama": "🖥️ Ollama (Local)",
-            "groq": "⚡ Groq (LPU Cloud)",
-            "puter": "🧠 Claude (Puter Free)",
-        }.get(x.lower(), x),
-    )
-    ai_provider = ai_provider.lower()
-    st.session_state.ai_provider = ai_provider
-
-    if ai_provider == "ollama":
-        ollama_models = AIProvider.get_ollama_models()
-        if ollama_models:
-            st.session_state.ai_model_name = st.sidebar.selectbox("Model", ollama_models)
-        else:
-            st.sidebar.warning("Nessun modello Ollama trovato.")
-            st.session_state.ai_model_name = None
-    elif ai_provider == "groq":
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            api_key = st.sidebar.text_input("Groq API Key", type="password")
-            if api_key:
-                os.environ["GROQ_API_KEY"] = api_key
-        if not os.getenv("GROQ_API_KEY"):
-            st.sidebar.warning("🔑 Groq API Key richiesta.")
-            st.session_state.ai_model_name = None
-        else:
-            try:
-                groq_models = AIProvider.get_groq_models(api_key=os.getenv("GROQ_API_KEY"))
-            except Exception:
-                groq_models = []
-            if groq_models:
-                st.session_state.ai_model_name = st.sidebar.selectbox("Model", groq_models)
-            else:
-                st.sidebar.error("❌ Impossibile caricare modelli Groq.")
-                st.session_state.ai_model_name = None
-    elif ai_provider == "puter":
-        puter_key = os.getenv("PUTER_API_KEY")
-        if not puter_key:
-            puter_key = st.sidebar.text_input("Puter Auth Token", type="password")
-            if puter_key:
-                os.environ["PUTER_API_KEY"] = puter_key
-        if not os.getenv("PUTER_API_KEY"):
-            st.sidebar.warning("🔑 Puter Auth Token richiesto.")
-            st.session_state.ai_model_name = None
-        else:
-            puter_models = AIProvider.get_puter_models()
-            st.session_state.ai_model_name = st.sidebar.selectbox("Claude Model", puter_models)
-    else:
-        try:
-            gemini_models = AIProvider.get_gemini_models()
-        except Exception:
-            gemini_models = AIProvider.FALLBACK_ORDER
-        if gemini_models:
-            st.session_state.ai_model_name = st.sidebar.selectbox("Model", gemini_models)
-        else:
-            st.sidebar.error("❌ Impossibile caricare modelli Gemini.")
-            st.session_state.ai_model_name = None
+    provider, model = AIProvider.render_streamlit_sidebar()
+    st.session_state.ai_provider = provider
+    st.session_state.ai_model_name = model
 
 
 # ─── Main Dashboard ─────────────────────────────────────────────────────────

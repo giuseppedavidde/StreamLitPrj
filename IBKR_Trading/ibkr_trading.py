@@ -260,7 +260,20 @@ ISTRUZIONI:
         actual_model = agent.ai.current_model_name
         print(f"🤖 Chat using: {provider_type} / {actual_model} | KB: {kb_name}")
         response = agent.ai.get_model().generate_content(prompt)
-        model_badge = f"*🤖 Model: `{provider_type}` / `{actual_model}`*  |  *📚 Knowledge: `{kb_name}`*\n\n---\n\n"
+
+        # Build model badge — include LlamaCpp stats if available
+        badge_parts = [
+            f"*🤖 Model: `{provider_type}` / `{actual_model}`*",
+            f"*📚 Knowledge: `{kb_name}`*",
+        ]
+        if hasattr(response, "tokens_per_sec") and response.tokens_per_sec > 0:
+            badge_parts.append(f"*⚡ {response.tokens_per_sec:.1f} t/s*")
+        if hasattr(response, "total_tokens") and response.total_tokens > 0:
+            badge_parts.append(f"*🔢 {response.total_tokens} tokens*")
+        if hasattr(response, "duration_sec") and response.duration_sec > 0:
+            badge_parts.append(f"*⏱️ {response.duration_sec:.1f}s*")
+
+        model_badge = "  |  ".join(badge_parts) + "\n\n---\n\n"
         return model_badge + response.text
     except Exception as e:
         return f"❌ AI Error ({provider_type}/{model_name}): {e}"
@@ -276,19 +289,28 @@ def get_historical_data_with_fallback(connector, ticker, **kwargs):
     sec_type = kwargs.get("sec_type", "STK")
     duration = kwargs.get("duration", "6 M")
     
-    try:
-        df = connector.get_historical_data(ticker, **kwargs)
-    except Exception as e:
-        print(f"IBKR fetch failed for {ticker}: {e}")
+    # Only attempt IBKR if the connector is actually connected
+    if connector.connected:
+        try:
+            df = connector.get_historical_data(ticker, **kwargs)
+        except Exception as e:
+            print(f"IBKR fetch failed for {ticker}: {e}")
+    else:
+        print(f"IBKR not connected, skipping for {ticker}")
 
     if (df is None or df.empty) and sec_type == "STK":
         print(f"Attempting yfinance fallback for {ticker}")
         try:
             dur = duration.upper().replace(" ", "")
-            period_map = {"1M": "1mo", "3M": "3mo", "6M": "6mo", "1Y": "1y", "2Y": "2y", "5Y": "5y"}
+            period_map = {"1D": "5d", "1W": "5d", "1M": "1mo", "3M": "3mo", "6M": "6mo", "1Y": "1y", "2Y": "2y", "5Y": "5y"}
             p = period_map.get(dur, "6mo")
             
-            yf_df = yf.download(ticker, period=p, progress=False)
+            # Map bar_size_setting to yfinance interval
+            bar_size = kwargs.get("bar_size_setting", "1 day").lower()
+            interval_map = {"1 min": "1m", "5 mins": "5m", "15 mins": "15m", "30 mins": "30m", "1 hour": "1h", "1 day": "1d", "1 week": "1wk", "1 month": "1mo"}
+            interval = interval_map.get(bar_size, "1d")
+            
+            yf_df = yf.download(ticker, period=p, interval=interval, progress=False)
             if yf_df is not None and not yf_df.empty:
                 if isinstance(yf_df.columns, pd.MultiIndex):
                     yf_df.columns = [col[0] for col in yf_df.columns]
@@ -298,7 +320,7 @@ def get_historical_data_with_fallback(connector, ticker, **kwargs):
                     yf_df.index.name = 'date'
                 
                 df = yf_df
-                data_source = "YFinance Fallback"
+                data_source = "YFinance"
                 print(f"✅ YFinance fallback successful for {ticker}")
         except Exception as e:
             print(f"yfinance fallback failed for {ticker}: {e}")
@@ -373,29 +395,38 @@ with _gw_col2:
 if not _ib_gw_available:
     st.sidebar.caption(f"⚠️ `ib-gw` not found at `{_IB_GW_PATH}`")
 
-# ── API Connection (uses auto-port from trading mode) ──
-_conn_col1, _conn_col2 = st.sidebar.columns(2)
-with _conn_col1:
-    if st.button("Connect", width="stretch"):
-        try:
-            st.session_state.connector.connect("127.0.0.1", _auto_port, 1)
+# ── API Auto-Connection (uses auto-port from trading mode) ──
+if "manual_disconnect" not in st.session_state:
+    st.session_state.manual_disconnect = False
+
+if not st.session_state.connector.connected and not st.session_state.manual_disconnect:
+    try:
+        # Auto-connect silently with a short timeout.
+        # Local connections are nearly instant if the gateway is listening.
+        st.session_state.connector.connect("127.0.0.1", _auto_port, 1, timeout=1)
+        if st.session_state.connector.connected:
             st.session_state.pop("opt_cache_key", None)
-            st.rerun()
-        except Exception as e:
-            print(f"[ERROR] Connection failed: {type(e).__name__}: {e}")
-            traceback.print_exc()
-            st.error(f"Connection Failed: {e}")
-with _conn_col2:
-    if st.button("Disconnect", width="stretch"):
+    except Exception:
+        pass
+
+if st.session_state.connector.connected:
+    if st.sidebar.button("Disconnect", width="stretch"):
         st.session_state.connector.disconnect()
+        st.session_state.manual_disconnect = True
         for k in ["opt_exps", "opt_strikes", "opt_cache_key"]:
             st.session_state.pop(k, None)
         st.rerun()
+elif st.session_state.manual_disconnect:
+    if st.sidebar.button("Reconnect", width="stretch"):
+        st.session_state.manual_disconnect = False
+        st.rerun()
 
 is_connected = st.session_state.connector.connected
-st.sidebar.markdown(
-    f"**API:** {'🟢 Connected' if is_connected else '🔴 Disconnected'} · Port `{_auto_port}`"
-)
+if is_connected:
+    st.sidebar.markdown(f"**API:** 🟢 Connected · Port `{_auto_port}`")
+else:
+    st.sidebar.markdown(f"**API:** 🔴 Disconnected · Port `{_auto_port}`")
+    st.sidebar.caption("📊 Stock data via YFinance (Options require IBKR)")
 st.sidebar.markdown("---")
 
 # Data Selection
@@ -473,98 +504,9 @@ if st.session_state.get("archived_sessions"):
 
 # AI Model Selection
 if TraderAgent and AIProvider:
-    st.sidebar.title("AI Model")
-    supported_providers = AIProvider.get_supported_providers()
-    ai_provider = st.sidebar.selectbox(
-        "Provider",
-        supported_providers,
-        format_func=lambda x: (
-            "☁️ Gemini (Cloud)"
-            if x.lower() == "gemini"
-            else "🖥️ Ollama (Local)"
-            if x.lower() == "ollama"
-            else "⚡ Groq (LPU Cloud)"
-            if x.lower() == "groq"
-            else "🧠 Claude (Puter Free)"
-        ),
-    )
-    # The application internally relies on lowercased provider strings.
-    ai_provider = ai_provider.lower()
-    st.session_state.ai_provider = ai_provider
-
-    if ai_provider == "ollama":
-        ollama_models = AIProvider.get_ollama_models()
-        if ollama_models:
-            ai_model = st.sidebar.selectbox("Model", ollama_models)
-            st.session_state.ai_model_name = ai_model
-        else:
-            st.sidebar.warning("No Ollama models found. Is Ollama running?")
-            st.session_state.ai_model_name = None
-    elif ai_provider == "groq":
-        # Groq specific verification
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            api_key = st.sidebar.text_input("Groq API Key", type="password")
-            if api_key:
-                os.environ["GROQ_API_KEY"] = api_key
-
-        if not os.getenv("GROQ_API_KEY"):
-            st.sidebar.warning("🔑 Groq API Key required.")
-            st.session_state.ai_model_name = None
-        else:
-            try:
-                # Fetch models dynamically using the confirmed key
-                groq_models = AIProvider.get_groq_models(
-                    api_key=os.getenv("GROQ_API_KEY")
-                )
-            except Exception as e:
-                st.sidebar.error(f"Debug Info: {e}")
-                print(f"Error fetching Groq models: {e}")
-                groq_models = []
-
-            if not groq_models:
-                st.sidebar.error("❌ Could not fetch Groq models. Check API Key.")
-                st.session_state.ai_model_name = None
-            else:
-                st.session_state.ai_model_name = st.sidebar.selectbox(
-                    "Model", groq_models
-                )
-    elif ai_provider == "puter":
-        # Puter / Claude Free API
-        puter_key = os.getenv("PUTER_API_KEY")
-        if not puter_key:
-            puter_key = st.sidebar.text_input(
-                "Puter Auth Token",
-                type="password",
-                help="Get your token from puter.com → Settings. Stored as PUTER_API_KEY env var.",
-            )
-            if puter_key:
-                os.environ["PUTER_API_KEY"] = puter_key
-
-        if not os.getenv("PUTER_API_KEY"):
-            st.sidebar.warning("🔑 Puter Auth Token required. Get it from puter.com.")
-            st.session_state.ai_model_name = None
-        else:
-            puter_models = AIProvider.get_puter_models()
-            st.session_state.ai_model_name = st.sidebar.selectbox(
-                "Claude Model", puter_models
-            )
-    else:
-        # For Gemini, let the user select the model
-        try:
-            gemini_models = AIProvider.get_gemini_models()
-        except Exception as e:
-            st.sidebar.error(f"Debug Info: {e}")
-            print(f"Error fetching Gemini models: {e}")
-            gemini_models = AIProvider.FALLBACK_ORDER
-
-        if not gemini_models:
-            st.sidebar.error("❌ Could not fetch Gemini models.")
-            st.session_state.ai_model_name = None
-        else:
-            st.session_state.ai_model_name = st.sidebar.selectbox(
-                "Model", gemini_models
-            )
+    provider, model = AIProvider.render_streamlit_sidebar()
+    st.session_state.ai_provider = provider
+    st.session_state.ai_model_name = model
 
 # EMA Colors
 if TraderAgent and AIProvider:
@@ -599,131 +541,133 @@ if view_mode == "🎡 Wheel Strategy Scanner":
     )
 
     if st.button("🚀 Run Wheel Scanner", type="primary"):
-        if not is_connected:
-            st.error("Connect to IBKR first!")
-        else:
-            with st.spinner(
-                "Scanning market data and computing IV (this may take a minute)..."
-            ):
-                tickers = [
-                    t.strip().upper() for t in tickers_input.split(",") if t.strip()
-                ]
-                market_data = []
+        with st.spinner(
+            "Scanning market data and computing IV (this may take a minute)..."
+        ):
+            tickers = [
+                t.strip().upper() for t in tickers_input.split(",") if t.strip()
+            ]
+            market_data = []
 
-                for t in tickers:
-                    try:
-                        # Fetch short-term data to get Price, RSI, Trend
-                        df, _src = get_historical_data_with_fallback(
-                            st.session_state.connector,
-                            ticker=t,
-                            sec_type="STK",
-                            duration="6 M",
-                            timeframe="1 day"
-                        )
-                        if _src == 'YFinance Fallback':
-                            st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
-                        if df is not None and not df.empty:
-                            from technical_analysis import (
-                                add_indicators,
-                                detect_patterns,
-                            )
-
-                            df = add_indicators(df)
-                            analysis = detect_patterns(df)
-
-                            price = analysis.get("current_price", df.iloc[-1]["close"])
-                            rsi = analysis.get("rsi", "N/A")
-                            trend = analysis.get("trend", "N/A")
-
-                            # Get IV
-                            iv_data = st.session_state.connector.get_implied_volatility(
-                                t
-                            )
-                            if isinstance(iv_data, dict):
-                                iv_val = iv_data.get("iv") or iv_data.get("avg")
-                            else:
-                                iv_val = iv_data
-
-                            iv_str = f"{iv_val*100:.1f}%" if iv_val else "N/A"
-
-                            market_data.append(
-                                {
-                                    "ticker": t,
-                                    "price": (
-                                        round(price, 2)
-                                        if isinstance(price, (int, float))
-                                        else price
-                                    ),
-                                    "iv": iv_str,
-                                    "bid_ask_spread": "N/A",  # Will be inferred tight for large caps
-                                    "trend": trend,
-                                    "rsi": (
-                                        round(rsi, 2)
-                                        if isinstance(rsi, (int, float))
-                                        else rsi
-                                    ),
-                                }
-                            )
-                    except Exception as e:
-                        st.warning(f"Could not fetch data for {t}: {e}")
-
-                if market_data:
-                    st.info("Market data gathered. Running AI Candidate Analysis...")
-
-                    if not TraderAgent:
-                        st.error(
-                            "TraderAgent module not loaded. Check environment/imports."
-                        )
-                    else:
-                        agent = TraderAgent(
-                            provider_type=st.session_state.get("ai_provider", "gemini"),
-                            model_name=st.session_state.get("ai_model_name"),
+            for t in tickers:
+                try:
+                    # Fetch short-term data to get Price, RSI, Trend
+                    df, _src = get_historical_data_with_fallback(
+                        st.session_state.connector,
+                        ticker=t,
+                        sec_type="STK",
+                        duration="6 M",
+                        timeframe="1 day"
+                    )
+                    if _src == 'YFinance':
+                        st.warning(f'⚠️ {t}: Using YFinance data (IBKR not connected).')
+                    if df is not None and not df.empty:
+                        from technical_analysis import (
+                            add_indicators,
+                            detect_patterns,
                         )
 
-                        try:
-                            import json
+                        df = add_indicators(df)
+                        analysis = detect_patterns(df)
 
-                            res_json_str = agent.scan_put_selling_candidates(
-                                market_data, time_horizon=time_horizon
-                            )
-                            res = json.loads(res_json_str)
+                        price = analysis.get("current_price", df.iloc[-1]["close"])
+                        rsi = analysis.get("rsi", "N/A")
+                        trend = analysis.get("trend", "N/A")
 
-                            st.success("✅ AI Analysis Complete")
-                            overview = res.get("market_overview", "")
-                            if overview:
-                                st.markdown(f"**Overview:** {overview}")
+                        # Get IV (only if IBKR is connected)
+                        iv_val = None
+                        if is_connected:
+                            try:
+                                iv_data = st.session_state.connector.get_implied_volatility(
+                                    t
+                                )
+                                if isinstance(iv_data, dict):
+                                    iv_val = iv_data.get("iv") or iv_data.get("avg")
+                                else:
+                                    iv_val = iv_data
+                            except Exception:
+                                pass
 
-                            st.subheader("🏆 Best Candidates")
-                            best = res.get("best_candidates", [])
-                            if best:
-                                for c in best:
-                                    with st.expander(
-                                        f"⭐ {c.get('ticker')} (Score: {c.get('score')}/10)",
-                                        expanded=True,
-                                    ):
-                                        st.write(
-                                            f"**Suggested Delta:** {c.get('suggested_delta')}"
-                                        )
-                                        st.info(f"💡 {c.get('rationale')}")
-                            else:
-                                st.warning("No suitable candidates found in this list.")
+                        iv_str = f"{iv_val*100:.1f}%" if iv_val else "N/A"
 
-                            st.subheader("❌ Rejected Candidates")
-                            rejected = res.get("rejected_candidates", [])
-                            if rejected:
-                                for c in rejected:
-                                    st.error(
-                                        f"**{c.get('ticker')}**: {c.get('reason')}"
-                                    )
-                            else:
-                                st.success("No candidates were explicitly rejected.")
-                        except json.JSONDecodeError:
-                            st.error("AI returned invalid JSON. Raw response:")
-                            st.code(res_json_str)
-                        except Exception as e:
-                            st.error(f"Error executing AI analysis: {e}")
+                        market_data.append(
+                            {
+                                "ticker": t,
+                                "price": (
+                                    round(price, 2)
+                                    if isinstance(price, (int, float))
+                                    else price
+                                ),
+                                "iv": iv_str,
+                                "bid_ask_spread": "N/A",  # Will be inferred tight for large caps
+                                "trend": trend,
+                                "rsi": (
+                                    round(rsi, 2)
+                                    if isinstance(rsi, (int, float))
+                                    else rsi
+                                ),
+                            }
+                        )
+                except Exception as e:
+                    st.warning(f"Could not fetch data for {t}: {e}")
+
+            if market_data:
+                st.info("Market data gathered. Running AI Candidate Analysis...")
+
+                if not TraderAgent:
+                    st.error(
+                        "TraderAgent module not loaded. Check environment/imports."
+                    )
                 else:
-                    st.error("No valid market data could be gathered.")
+                    agent = TraderAgent(
+                        provider_type=st.session_state.get("ai_provider", "gemini"),
+                        model_name=st.session_state.get("ai_model_name"),
+                    )
+
+                    try:
+                        import json
+
+                        res_json_str = agent.scan_put_selling_candidates(
+                            market_data, time_horizon=time_horizon
+                        )
+                        res = json.loads(res_json_str)
+
+                        st.success("✅ AI Analysis Complete")
+                        overview = res.get("market_overview", "")
+                        if overview:
+                            st.markdown(f"**Overview:** {overview}")
+
+                        st.subheader("🏆 Best Candidates")
+                        best = res.get("best_candidates", [])
+                        if best:
+                            for c in best:
+                                with st.expander(
+                                    f"⭐ {c.get('ticker')} (Score: {c.get('score')}/10)",
+                                    expanded=True,
+                                ):
+                                    st.write(
+                                        f"**Suggested Delta:** {c.get('suggested_delta')}"
+                                    )
+                                    st.info(f"💡 {c.get('rationale')}")
+                        else:
+                            st.warning("No suitable candidates found in this list.")
+
+                        st.subheader("❌ Rejected Candidates")
+                        rejected = res.get("rejected_candidates", [])
+                        if rejected:
+                            for c in rejected:
+                                st.error(
+                                    f"**{c.get('ticker')}**: {c.get('reason')}"
+                                )
+                        else:
+                            st.success("No candidates were explicitly rejected.")
+                    except json.JSONDecodeError:
+                        st.error("AI returned invalid JSON. Raw response:")
+                        st.code(res_json_str)
+                    except Exception as e:
+                        st.error(f"Error executing AI analysis: {e}")
+            else:
+                st.error("No valid market data could be gathered.")
 
     st.stop()  # Stops execution here so the standard dashboard won't render below
 
@@ -812,8 +756,6 @@ elif view_mode == "📊 Earnings Backtester":
     if st.button("🚀 Run Earnings Backtest", type="primary", use_container_width=True):
         if not selected_strategies:
             st.error("Please select at least one strategy.")
-        elif not is_connected:
-            st.error("Connect to IBKR first! (required for historical price data)")
         else:
             # Step 1: Fetch earnings dates (no IBKR needed)
             with st.spinner(f"📅 Fetching earnings dates for {bt_ticker} from Yahoo Finance..."):
@@ -985,7 +927,7 @@ right = None
 
 if sec_type == "OPT":
     if not is_connected:
-        st.warning("⚠️ Connect to IBKR first to load Option Chain data.")
+        st.warning("⚠️ Connect to IBKR to load Option Chain data. Options are not available via YFinance.")
     else:
         opt_cache_key = f"opt_{ticker}"
         if st.session_state.get("opt_cache_key") != opt_cache_key:
@@ -1107,8 +1049,8 @@ if sec_type == "OPT":
                                 duration="1 Y",
                                 bar_size_setting="1 day",
                             )
-                            if _src == 'YFinance Fallback':
-                                st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
+                            if _src == 'YFinance':
+                                st.warning('⚠️ Using YFinance data (IBKR not connected).')
                             if und_df is not None and not und_df.empty:
                                 und_df = add_indicators(und_df)
                                 und_analysis = detect_patterns(und_df)
@@ -1547,8 +1489,8 @@ if sec_type == "OPT":
                                 duration=duration,
                                 bar_size_setting=timeframe,
                             )
-                            if _src == 'YFinance Fallback':
-                                st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
+                            if _src == 'YFinance':
+                                st.warning('⚠️ Using YFinance data (IBKR not connected).')
                             if und_df is not None and not und_df.empty:
                                 und_df = add_indicators(und_df)
                                 st.session_state.underlying_df = und_df
@@ -1590,8 +1532,8 @@ if sec_type == "OPT":
                                     expiry=leg["expiry"],
                                     right=leg["right"],
                                 )
-                                if _src == 'YFinance Fallback':
-                                    st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
+                                if _src == 'YFinance':
+                                    st.warning('⚠️ Using YFinance data (IBKR not connected).')
 
                                 leg_meta = {
                                     "leg_id": leg_idx,
@@ -1667,9 +1609,11 @@ if sec_type == "OPT":
                 )
 
 # Fetch Data & Analyze
-can_fetch = is_connected
-if sec_type == "OPT" and (not expiry or not strike or not right):
-    can_fetch = False
+# STK can always be fetched (YFinance fallback); OPT requires IBKR connection + selection
+can_fetch = True
+if sec_type == "OPT":
+    if not is_connected or not expiry or not strike or not right:
+        can_fetch = False
 
 if st.button("Fetch Data & Analyze", disabled=not can_fetch):
     with st.spinner("Fetching historical data..."):
@@ -1694,8 +1638,8 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
                         duration=duration,
                         bar_size_setting=timeframe,
                     )
-                    if _src == 'YFinance Fallback':
-                        st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
+                    if _src == 'YFinance':
+                        st.warning('⚠️ Using YFinance data (IBKR not connected).')
                     if und_df is not None and not und_df.empty:
                         und_df = add_indicators(und_df)
                         st.session_state.underlying_df = und_df
@@ -1716,8 +1660,8 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
                 bar_size_setting=fetch_timeframe,
                 **opt_kwargs,
             )
-            if _src == 'YFinance Fallback':
-                st.warning('⚠️ IBKR failed to provide data. Automatically switched to YFinance Fallback.')
+            if _src == 'YFinance':
+                st.warning('⚠️ Using YFinance data (IBKR not connected).')
 
             if df is not None and not df.empty:
                 df = add_indicators(df)
