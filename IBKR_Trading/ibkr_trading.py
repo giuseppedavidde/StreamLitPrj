@@ -23,9 +23,13 @@ load_dotenv()
 try:
     from agents import TraderAgent
     from agents.ai_provider import AIProvider
+    from agents.opencode_debate import OpencodeDebate
+    from agents.opencode_agent import OpencodeAgent
 except ImportError:
     TraderAgent = None
     AIProvider = None
+    OpencodeDebate = None
+    OpencodeAgent = None
 
 # Streamlit Config
 st.set_page_config(page_title="IBKR AI Trader", layout="wide")
@@ -474,6 +478,7 @@ if _prev_ticker is not None and (_prev_ticker != ticker or _prev_sec_type != sec
         "opt_cache_key", "opt_exps", "opt_strikes",
         "opt_strategies_chat",
         "opt_selected_expiry", "opt_selected_strike", "opt_selected_right",
+        "opencode_session_id",
     ]
     for k in stale_keys:
         st.session_state.pop(k, None)
@@ -502,8 +507,16 @@ if st.session_state.get("archived_sessions"):
                         st.markdown(f"📊 **{s.get('name', 'N/A')}** — {s.get('direction', '')}")
             st.markdown("---")
 
-# AI Model Selection
-if TraderAgent and AIProvider:
+# Opencode Agent (must render first to check if active)
+if OpencodeDebate:
+    opencode_config = OpencodeDebate.render_streamlit_sidebar()
+    st.session_state.opencode_config = opencode_config
+
+# AI Model Selection — only when Opencode is NOT active
+opencode_active = OpencodeDebate is not None and st.session_state.get("opencode_config") is not None
+if opencode_active:
+    st.sidebar.caption("🤖 Provider LLM disattivati — AI via Opencode Agent")
+elif TraderAgent and AIProvider:
     provider, model = AIProvider.render_streamlit_sidebar()
     st.session_state.ai_provider = provider
     st.session_state.ai_model_name = model
@@ -516,6 +529,10 @@ if TraderAgent and AIProvider:
         ema200_color = st.color_picker("EMA 200", "#FF1493", key="ema200_color")
 else:
     ema20_color, ema50_color, ema200_color = "#00BFFF", "#FFD700", "#FF1493"
+
+# Opencode Debate History
+if OpencodeDebate:
+    OpencodeDebate.render_debate_history_ui()
 
 # ─── Navigation & Modes ─────────────────────────────────────────────────────
 st.sidebar.markdown("---")
@@ -2229,6 +2246,31 @@ elif "market_df" in st.session_state:
         st.info("AI Agent not available (agents module not found).")
     else:
         # 🌍 Geopolitics Section
+        # Auto-fill news context via Opencode (once per ticker)
+        _oc_cfg = st.session_state.get("opencode_config")
+        _auto_key = "geo_events_filled_for"
+        _prev_filled = st.session_state.get(_auto_key)
+        _current_ticker = meta.get("ticker", "")
+        if OpencodeDebate and _oc_cfg and _current_ticker and _current_ticker != _prev_filled:
+            st.session_state[_auto_key] = _current_ticker
+            with st.spinner(f"🔍 Opencode: cerca news geopolitiche per {_current_ticker}..."):
+                try:
+                    _oc_agent = OpencodeAgent(_oc_cfg)
+                    _oc_prompt = (
+                        f"Cerca sul web le notizie e gli eventi geopolitici degli ultimi 3 mesi "
+                        f"relativi al ticker {_current_ticker} e al suo settore di appartenenza. "
+                        f"Fornisci un riassunto di massimo 5 bullet points degli eventi chiave "
+                        f"che potrebbero influenzare il prezzo del titolo. "
+                        f"Includi: rischi geopolitici, cambi normativi, tensioni commerciali, "
+                        f"problemi di supply chain, fattori macroeconomici."
+                    )
+                    _news_text = ""
+                    for _chunk in _oc_agent.stream_prompt(_oc_prompt):
+                        _news_text += _chunk
+                    st.session_state["geo_events_input"] = _news_text
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+
         with st.expander("🌍 Geopolitical Risk Analysis", expanded=False):
             st.write("Analyze the macro-geopolitical risk for this asset using institutional frameworks.")
             col_geo1, col_geo2 = st.columns([2, 1])
@@ -2257,26 +2299,122 @@ elif "market_df" in st.session_state:
         # Auto-generate initial analysis on first fetch
         if st.session_state.get("needs_initial_analysis"):
             st.session_state.needs_initial_analysis = False
-            with st.spinner("🤖 AI analyzing market data..."):
-                if meta.get("sec_type") == "OPT":
-                    initial_prompt = (
-                        f"Analizza la situazione di mercato per l'OPZIONE su {meta['ticker']} "
-                        f"sul timeframe {meta['timeframe']}. "
-                        "Usa i principi teorici di Fontanills per valutare le Greche e la Volatilità. "
-                        "Fornisci: 1) Analisi Sintetica delle Greche e del Pricing, 2) Opportunità Strategica (Sì/No/Forse), "
-                        "3) Direzione Implicita, 4) Livelli Chiave (strutture consigliate), "
-                        "5) Probabilità di successo."
+            meta = st.session_state.get("market_meta", {})
+            analysis = st.session_state.get("market_analysis", {})
+
+            opencode_config = st.session_state.get("opencode_config")
+            if OpencodeDebate and opencode_config is not None:
+                # ── Opencode Debate (auto-start) ──
+                holders = st.session_state.get("market_holders", {})
+                financials = st.session_state.get("market_financials", {})
+                holders_text = ""
+                if holders:
+                    holders_text = (
+                        f"Top istituzionali: {holders.get('top_institutional', 'N/A')}\n"
+                        f"Top ETF: {holders.get('top_etf', 'N/A')}"
                     )
-                else:
-                    initial_prompt = (
-                        f"Analizza la situazione di mercato per {meta['ticker']} "
-                        f"sul timeframe {meta['timeframe']}. "
-                        "Usa i principi di Volume Price Analysis (VPA) e Price Action. "
-                        "Fornisci: 1) Analisi VPA (Anomalie prezzo-volume), 2) Setup Volman (se applicabile), "
-                        "3) Direzione (Long/Short/Wait), 4) Livelli Chiave (S/L a 10 pip e T/P a 20 pip), "
-                        "5) Probabilità di successo."
+                financials_text = ""
+                if financials:
+                    financials_text = "\n".join(
+                        f"{k}: {v}" for k, v in financials.items() if v is not None
                     )
-                ai_response = _chat_with_ai(initial_prompt)
+                patterns_list = analysis.get("patterns", [])
+                if isinstance(patterns_list, str):
+                    patterns_list = [patterns_list]
+
+                progress_bar = st.progress(0, text="🧪 Avvio Opencode Debate...")
+                
+                # Render directly into a chat message container for better UX
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.caption("🧪 **Opencode Debate** in corso...")
+                    output_area = st.empty()
+
+                    debate = OpencodeDebate(opencode_config)
+                    stream = debate.debate_technical_analysis(
+                        ticker=meta.get("ticker", "N/A"),
+                        price=analysis.get("current_price", 0.0),
+                        change=analysis.get("change_pct"),
+                        trend=analysis.get("trend", "Unknown"),
+                        adx=analysis.get("adx"),
+                        rsi=analysis.get("rsi"),
+                        stoch_k=analysis.get("stoch_k"),
+                        stoch_d=analysis.get("stoch_d"),
+                        williams_r=analysis.get("williams_r"),
+                        macd=analysis.get("macd"),
+                        macd_signal=analysis.get("macd_signal"),
+                        macd_histogram=analysis.get("macd_histogram"),
+                        bb_position=analysis.get("bb_position", "N/A"),
+                        bb_width=analysis.get("bb_width"),
+                        volume_ratio=analysis.get("volume_ratio"),
+                        volume_signal=analysis.get("volume_info", "N/A"),
+                        patterns=patterns_list,
+                        holders_text=holders_text if holders_text else None,
+                        financials_text=financials_text if financials_text else None,
+                    )
+
+                    full_text = ""
+                    round_idx = -1
+                    round_chars = 0
+                    round_targets = [3000, 3000, 2000] # Stime più realistiche
+                    bases = [3, 33, 66]
+                    widths = [30, 33, 29]
+
+                    for chunk in stream:
+                        if "Round 1/3" in chunk:
+                            round_idx = 0
+                            round_chars = 0
+                            progress_bar.progress(3, text="📊 Round 1/3: Analisi Base")
+                        elif "Round 2/3" in chunk:
+                            round_idx = 1
+                            round_chars = 0
+                            progress_bar.progress(33, text="📈 Round 2/3: Analisi VPA (Coulling/Volman)")
+                        elif "Round 3/3" in chunk:
+                            round_idx = 2
+                            round_chars = 0
+                            progress_bar.progress(66, text="🏆 Round 3/3: Sintesi Giudice")
+
+                        full_text += chunk
+                        round_chars += len(chunk)
+
+                        if round_idx >= 0:
+                            pct = min(round_chars / round_targets[round_idx], 0.95)
+                            total = bases[round_idx] + pct * widths[round_idx]
+                            labels = [
+                                "Analisi Base in corso...",
+                                "Analisi VPA in corso...",
+                                "Sintesi finale in corso...",
+                            ]
+                            progress_bar.progress(int(total), text=labels[round_idx])
+
+                        output_area.markdown(full_text)
+
+                progress_bar.progress(100, text="✅ Debate completato!")
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": f"## 🧪 Opencode Debate\n\n{full_text}"}
+                )
+
+            else:
+                # ── Traditional AI Analysis (via AIProvider) ──
+                with st.spinner("🤖 AI analyzing market data..."):
+                    if meta.get("sec_type") == "OPT":
+                        initial_prompt = (
+                            f"Analizza la situazione di mercato per l'OPZIONE su {meta['ticker']} "
+                            f"sul timeframe {meta['timeframe']}. "
+                            "Usa i principi teorici di Fontanills per valutare le Greche e la Volatilità. "
+                            "Fornisci: 1) Analisi Sintetica delle Greche e del Pricing, 2) Opportunità Strategica (Sì/No/Forse), "
+                            "3) Direzione Implicita, 4) Livelli Chiave (strutture consigliate), "
+                            "5) Probabilità di successo."
+                        )
+                    else:
+                        initial_prompt = (
+                            f"Analizza la situazione di mercato per {meta['ticker']} "
+                            f"sul timeframe {meta['timeframe']}. "
+                            "Usa i principi di Volume Price Analysis (VPA) e Price Action. "
+                            "Fornisci: 1) Analisi VPA (Anomalie prezzo-volume), 2) Setup Volman (se applicabile), "
+                            "3) Direzione (Long/Short/Wait), 4) Livelli Chiave (S/L a 10 pip e T/P a 20 pip), "
+                            "5) Probabilità di successo."
+                        )
+                    ai_response = _chat_with_ai(initial_prompt)
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": ai_response}
                 )
@@ -2313,12 +2451,30 @@ elif "market_df" in st.session_state:
                     st.caption(f"📎 {', '.join(file_names)}")
                 st.markdown(user_input)
 
-            # Get AI response (with uploaded files if any)
+            # Get AI response
             with st.chat_message("assistant", avatar="🤖"):
                 with st.spinner("Analyzing..."):
-                    ai_response = _chat_with_ai(
-                        user_input, uploaded_files=uploaded_files or None
-                    )
+                    _oc_cfg = st.session_state.get("opencode_config")
+                    if OpencodeDebate and _oc_cfg is not None:
+                        # Opencode session-based chat
+                        _oc_agent = OpencodeAgent(_oc_cfg)
+                        _sid = st.session_state.get("opencode_session_id")
+                        if _sid is None:
+                            _sid = _oc_agent.create_session()
+                            st.session_state.opencode_session_id = _sid
+                        _response_chunks = []
+                        try:
+                            for _chunk in _oc_agent.stream_chat(user_input, _sid):
+                                _response_chunks.append(_chunk)
+                        except Exception as _e:
+                            ai_response = f"❌ Opencode Error: {_e}"
+                        else:
+                            ai_response = "".join(_response_chunks)
+                    else:
+                        # Traditional AI (via AIProvider)
+                        ai_response = _chat_with_ai(
+                            user_input, uploaded_files=uploaded_files or None
+                        )
                     st.markdown(ai_response)
             st.session_state.chat_history.append(
                 {"role": "assistant", "content": ai_response}
