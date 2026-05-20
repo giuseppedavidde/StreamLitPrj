@@ -213,14 +213,20 @@ def _chat_with_ai(user_message: str, uploaded_files=None) -> str:
         )
         system_role = "Sei un Quantitative Options Analyst, esperto di strategie in opzioni e greche (modello Fontanills)."
     else:
-        vpa_knowledge = getattr(agent, "knowledge", {}).get("vpa", "")
-        kb_name = "Coulling/Volman VPA"
-        kb_section = (
-            f"\nCONOSCENZA TEORICA (VPA & Price Action - Coulling/Volman):\n{vpa_knowledge}\n"
-            if vpa_knowledge
-            else ""
-        )
-        system_role = "Sei un trader esperto e analista quantitativo, specializzato in Volume Price Analysis (VPA) e Price Action."
+        trading_kb = getattr(agent, "knowledge", {}).get("trading", "")
+        scalping_kb = getattr(agent, "knowledge", {}).get("scalping_trading", "")
+        kb_name = "Wyckoff/VPA + Volman"
+        kb_parts = []
+        if trading_kb:
+            kb_parts.append(
+                f"\nCONOSCENZA MEDIO/LUNGO TERMINE (Wyckoff, VPA, Volume Profile, Order Flow):\n{trading_kb}\n"
+            )
+        if scalping_kb:
+            kb_parts.append(
+                f"\nCONOSCENZA BREVE TERMINE (Volman Scalping):\n{scalping_kb}\n"
+            )
+        kb_section = "\n".join(kb_parts) if kb_parts else ""
+        system_role = "Sei un trader esperto e analista quantitativo, specializzato in Wyckoff Method, Volume Price Analysis (VPA), Order Flow e Price Action."
 
     # Build conversation with context
     history_text = ""
