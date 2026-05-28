@@ -25,9 +25,11 @@ try:
     from agents.ai_provider import AIProvider
     from agents.opencode_debate import OpencodeDebate
     from agents.opencode_agent import OpencodeAgent
+    from agents import load_skills_knowledge
 except ImportError:
     TraderAgent = None
     AIProvider = None
+    load_skills_knowledge = None
     OpencodeDebate = None
     OpencodeAgent = None
 
@@ -206,20 +208,23 @@ def _chat_with_ai(user_message: str, uploaded_files=None) -> str:
     sec_type = meta.get("sec_type", "STK")
 
     if sec_type == "OPT":
-        kb = getattr(agent, "knowledge", {}).get("options", "")
-        kb_name = "Fontanills Options"
+        skill_fw = load_skills_knowledge(["options-playbook", "options-course-workbook", "options-crash-course"]) if load_skills_knowledge else {}
+        kb = "\n\n".join(skill_fw.values()) if skill_fw else getattr(agent, "knowledge", {}).get("options", "")
+        kb_name = "Opencode Skills (Options)"
         kb_section = (
-            f"\nCONOSCENZA TEORICA (Opzioni - Fontanills):\n{kb}\n" if kb else ""
+            f"\nCONOSCENZA TEORICA (Options Skill Frameworks):\n{kb}\n" if kb else ""
         )
-        system_role = "Sei un Quantitative Options Analyst, esperto di strategie in opzioni e greche (modello Fontanills)."
+        system_role = "Sei un Quantitative Options Analyst, esperto di strategie in opzioni e greche."
     else:
-        trading_kb = getattr(agent, "knowledge", {}).get("trading", "")
-        scalping_kb = getattr(agent, "knowledge", {}).get("scalping_trading", "")
-        kb_name = "Wyckoff/VPA + Volman"
+        skill_fw = load_skills_knowledge(["wyckoff-2-0", "volume-price-analysis", "volume-profile", "trades-about-to-happen", "trading-against-the-crowd"]) if load_skills_knowledge else {}
+        volman_fw = load_skills_knowledge(["price-action-volman"]) if load_skills_knowledge else {}
+        trading_kb = "\n\n".join(skill_fw.values()) if skill_fw else getattr(agent, "knowledge", {}).get("trading", "")
+        scalping_kb = "\n\n".join(volman_fw.values()) if volman_fw else getattr(agent, "knowledge", {}).get("scalping_trading", "")
+        kb_name = "Opencode Skills (Stocks)"
         kb_parts = []
         if trading_kb:
             kb_parts.append(
-                f"\nCONOSCENZA MEDIO/LUNGO TERMINE (Wyckoff, VPA, Volume Profile, Order Flow):\n{trading_kb}\n"
+                f"\nCONOSCENZA ONDA MEDIA (Wyckoff, VPA, Volume Profile, Order Flow, Sentiment):\n{trading_kb}\n"
             )
         if scalping_kb:
             kb_parts.append(
@@ -446,6 +451,42 @@ sec_type = st.sidebar.selectbox("Security Type", ["STK", "OPT"])
 timeframe = st.sidebar.selectbox("Timeframe", ["1 hour", "5 mins", "1 day"])
 duration = st.sidebar.selectbox("Duration", ["1 D", "1 W", "1 M", "3 M", "6 M", "1 Y"])
 
+# ── Skill Selector per Opencode Debate ──
+_SKILLS_MAP = {
+    "stock": {
+        "wyckoff-2-0": "Wyckoff 2.0 — Structures & Order Flow",
+        "volume-price-analysis": "Volume Price Analysis (VPA)",
+        "volume-profile": "Volume Profile — Insider's Guide",
+        "trades-about-to-happen": "Trades About to Happen — Weis Wave",
+        "trading-against-the-crowd": "Trading Against the Crowd — Sentiment",
+        "price-action-volman": "Price Action (5min) — Bob Volman",
+    },
+    "options": {
+        "options-playbook": "Options Playbook — Overby",
+        "options-course-workbook": "Options Course Workbook — Fontanills",
+        "options-crash-course": "Options Crash Course",
+    },
+    "crypto": {
+        "crypto-technical-analysis": "Crypto Technical Analysis",
+        "crypto-crash-course": "Crypto Crash Course",
+    },
+}
+_SEC_DEFAULT = "stock" if sec_type == "STK" else "options"
+_AVAILABLE_SKILLS = list(_SKILLS_MAP[_SEC_DEFAULT].keys()) if _SEC_DEFAULT in _SKILLS_MAP else []
+_prev_skills = st.session_state.get("selected_skills", None)
+default_skills = _prev_skills if _prev_skills else list(_AVAILABLE_SKILLS)
+
+with st.sidebar.expander("📚 Skills Debate", expanded=True):
+    selected_skills = st.multiselect(
+        "Framework per dibattito",
+        options=_AVAILABLE_SKILLS,
+        default=default_skills,
+        format_func=lambda s: _SKILLS_MAP.get(_SEC_DEFAULT, {}).get(s, s),
+        key="skill_selector",
+    )
+    if selected_skills != _prev_skills:
+        st.session_state.selected_skills = selected_skills
+
 # ── Auto-clear stale data when ticker or sec_type changes ──
 _prev_ticker = st.session_state.get("_prev_ticker")
 _prev_sec_type = st.session_state.get("_prev_sec_type")
@@ -485,6 +526,7 @@ if _prev_ticker is not None and (_prev_ticker != ticker or _prev_sec_type != sec
         "opt_strategies_chat",
         "opt_selected_expiry", "opt_selected_strike", "opt_selected_right",
         "opencode_session_id",
+        "skill_selector", "selected_skills",
     ]
     for k in stale_keys:
         st.session_state.pop(k, None)
@@ -1244,7 +1286,7 @@ if sec_type == "OPT":
                     metrics_matrix = st.session_state.get("ai_metrics_matrix", [])
                     model_used = st.session_state.get("ai_strategies_model", "")
                     st.caption(
-                        f"*🤖 Suggested by `{model_used}`*  |  *📚 Knowledge: `Fontanills Options`*"
+                        f"*🤖 Suggested by `{model_used}`*  |  *📚 Knowledge: `Opencode Skills (Options)`*"
                     )
 
                     if metrics_matrix:
@@ -1458,8 +1500,9 @@ if sec_type == "OPT":
                                     provider_type=st.session_state.get("ai_provider", "gemini"),
                                     model_name=st.session_state.get("ai_model_name"),
                                 )
-                                kb = getattr(agent, "knowledge", {}).get("options", "")
-                                kb_section = f"\nCONOSCENZA TEORICA (Opzioni - Fontanills):\n{kb}\n" if kb else ""
+                                skill_fw = load_skills_knowledge(["options-playbook", "options-course-workbook", "options-crash-course"]) if load_skills_knowledge else {}
+                                kb = "\n\n".join(skill_fw.values()) if skill_fw else getattr(agent, "knowledge", {}).get("options", "")
+                                kb_section = f"\nCONOSCENZA TEORICA (Options Skill Frameworks):\n{kb}\n" if kb else ""
                                 
                                 history_text = ""
                                 for m in st.session_state.opt_strategies_chat[:-1][-4:]:
@@ -1479,7 +1522,7 @@ if sec_type == "OPT":
                                 
                                 actual_model = agent.ai.current_model_name
                                 provider = st.session_state.get("ai_provider", "gemini")
-                                model_badge = f"*🤖 Model: `{provider}` / `{actual_model}`*  |  *📚 Knowledge: `Fontanills Options`*\n\n---\n\n"
+                                model_badge = f"*🤖 Model: `{provider}` / `{actual_model}`*  |  *📚 Knowledge: `Opencode Skills (Options)`*\n\n---\n\n"
                                 formatted_ai_text = model_badge + ai_text
                                 
                                 st.session_state.opt_strategies_chat.append({"role": "assistant", "content": formatted_ai_text})
@@ -2078,9 +2121,10 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
                         provider_type=st.session_state.get("ai_provider", "gemini"),
                         model_name=st.session_state.get("ai_model_name"),
                     )
-                    kb = getattr(agent, "knowledge", {}).get("options", "")
+                    skill_fw = load_skills_knowledge(["options-playbook", "options-course-workbook", "options-crash-course"]) if load_skills_knowledge else {}
+                    kb = "\n\n".join(skill_fw.values()) if skill_fw else getattr(agent, "knowledge", {}).get("options", "")
                     kb_section = (
-                        f"\nCONOSCENZA TEORICA (Opzioni - Fontanills):\n{kb}\n"
+                        f"\nCONOSCENZA TEORICA (Options Skill Frameworks):\n{kb}\n"
                         if kb
                         else ""
                     )
@@ -2093,7 +2137,7 @@ if "strategy_legs_data" in st.session_state and st.session_state["strategy_legs_
                     # Add model and knowledge badge to Strategy Chat Analyst
                     actual_model = agent.ai.current_model_name
                     provider = st.session_state.get("ai_provider", "gemini")
-                    model_badge = f"*🤖 Model: `{provider}` / `{actual_model}`*  |  *📚 Knowledge: `Fontanills Options`*\n\n---\n\n"
+                    model_badge = f"*🤖 Model: `{provider}` / `{actual_model}`*  |  *📚 Knowledge: `Opencode Skills (Options)`*\n\n---\n\n"
                     ai_text = model_badge + ai_text
 
                     st.session_state.strategy_chat.append(
@@ -2310,7 +2354,7 @@ elif "market_df" in st.session_state:
 
             opencode_config = st.session_state.get("opencode_config")
             if OpencodeDebate and opencode_config is not None:
-                # ── Opencode Debate (auto-start) ──
+                # ── Opencode Multi-Skill Debate (auto-start) ──
                 holders = st.session_state.get("market_holders", {})
                 financials = st.session_state.get("market_financials", {})
                 holders_text = ""
@@ -2328,15 +2372,18 @@ elif "market_df" in st.session_state:
                 if isinstance(patterns_list, str):
                     patterns_list = [patterns_list]
 
-                progress_bar = st.progress(0, text="🧪 Avvio Opencode Debate...")
-                
-                # Render directly into a chat message container for better UX
+                skill_slugs = st.session_state.get("selected_skills", [])
+                n_skills = len(skill_slugs)
+                total_rounds = max(1 + n_skills + 1, 3)  # R1 + Rskills + Rfinal
+
+                progress_bar = st.progress(0, text="🧪 Avvio Opencode Multi-Skill Debate...")
+
                 with st.chat_message("assistant", avatar="🤖"):
-                    st.caption("🧪 **Opencode Debate** in corso...")
+                    st.caption(f"🧪 **Opencode Multi-Skill Debate** ({n_skills} skills)...")
                     output_area = st.empty()
 
                     debate = OpencodeDebate(opencode_config)
-                    stream = debate.debate_technical_analysis(
+                    stream = debate.debate_multi_skill(
                         ticker=meta.get("ticker", "N/A"),
                         price=analysis.get("current_price", 0.0),
                         change=analysis.get("change_pct"),
@@ -2356,47 +2403,31 @@ elif "market_df" in st.session_state:
                         patterns=patterns_list,
                         holders_text=holders_text if holders_text else None,
                         financials_text=financials_text if financials_text else None,
+                        skill_slugs=skill_slugs if skill_slugs else None,
                     )
 
                     full_text = ""
-                    round_idx = -1
-                    round_chars = 0
-                    round_targets = [3000, 3000, 2000] # Stime più realistiche
-                    bases = [3, 33, 66]
-                    widths = [30, 33, 29]
+                    # Dynamic progress tracking: parse round headers from stream
+                    current_round = 0
+                    round_targets = [3000] + [2500] * n_skills + [2000]
 
                     for chunk in stream:
-                        if "Round 1/3" in chunk:
-                            round_idx = 0
-                            round_chars = 0
-                            progress_bar.progress(3, text="📊 Round 1/3: Analisi Base")
-                        elif "Round 2/3" in chunk:
-                            round_idx = 1
-                            round_chars = 0
-                            progress_bar.progress(33, text="📈 Round 2/3: Analisi VPA (Coulling/Volman)")
-                        elif "Round 3/3" in chunk:
-                            round_idx = 2
-                            round_chars = 0
-                            progress_bar.progress(66, text="🏆 Round 3/3: Sintesi Giudice")
+                        for r in range(1, total_rounds + 1):
+                            marker = f"Round {r}/{total_rounds}"
+                            if marker in chunk:
+                                current_round = r - 1
+                                pct = int((current_round / total_rounds) * 100)
+                                labels = ["Analisi Base"] + [s.replace("-"," ").title() for s in skill_slugs] + ["Sintesi Finale"]
+                                lbl = labels[current_round] if current_round < len(labels) else f"Round {r}"
+                                progress_bar.progress(max(pct, 3), text=f"📊 {lbl}...")
+                                break
 
                         full_text += chunk
-                        round_chars += len(chunk)
-
-                        if round_idx >= 0:
-                            pct = min(round_chars / round_targets[round_idx], 0.95)
-                            total = bases[round_idx] + pct * widths[round_idx]
-                            labels = [
-                                "Analisi Base in corso...",
-                                "Analisi VPA in corso...",
-                                "Sintesi finale in corso...",
-                            ]
-                            progress_bar.progress(int(total), text=labels[round_idx])
-
                         output_area.markdown(full_text)
 
                 progress_bar.progress(100, text="✅ Debate completato!")
                 st.session_state.chat_history.append(
-                    {"role": "assistant", "content": f"## 🧪 Opencode Debate\n\n{full_text}"}
+                    {"role": "assistant", "content": f"## 🧪 Opencode Multi-Skill Debate\n\n{full_text}"}
                 )
 
             else:
@@ -2406,7 +2437,7 @@ elif "market_df" in st.session_state:
                         initial_prompt = (
                             f"Analizza la situazione di mercato per l'OPZIONE su {meta['ticker']} "
                             f"sul timeframe {meta['timeframe']}. "
-                            "Usa i principi teorici di Fontanills per valutare le Greche e la Volatilità. "
+                            "Usa i framework teorici (Options Playbook, Options Course, Crash Course) per valutare le Greche e la Volatilità. "
                             "Fornisci: 1) Analisi Sintetica delle Greche e del Pricing, 2) Opportunità Strategica (Sì/No/Forse), "
                             "3) Direzione Implicita, 4) Livelli Chiave (strutture consigliate), "
                             "5) Probabilità di successo."

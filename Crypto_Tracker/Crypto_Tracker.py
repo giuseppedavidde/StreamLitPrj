@@ -19,10 +19,24 @@ load_dotenv()
 try:
     from agents.ai_provider import AIProvider
     from agents.trader_agent import TraderAgent
+    from agents.opencode_agent import OpencodeAgent
+    from agents.opencode_debate import OpencodeDebate
+    from agents.knowledge_loader import (
+        load_category,
+        load_all_knowledge_with_skills,
+        load_skills_knowledge,
+        DEFAULT_SKILL_SLUGS,
+    )
 except ImportError as e:
     st.error(f"Modulo 'agents' non trovato o errore importazione: {e}")
     AIProvider = None
     TraderAgent = None
+    OpencodeAgent = None
+    OpencodeDebate = None
+    load_category = None  # type: ignore[assignment]
+    load_all_knowledge_with_skills = None  # type: ignore[assignment]
+    load_skills_knowledge = None  # type: ignore[assignment]
+    DEFAULT_SKILL_SLUGS = []  # type: ignore[assignment]
 
 from agents.cloud_ui import render_cloud_ui
 from modules.collect_data_utils import (
@@ -43,8 +57,17 @@ st.caption(
 
 # --- 0. SIDEBAR: AI CONFIGURATION ---
 st.sidebar.header("🤖 Configurazione AI")
-with st.sidebar.expander("Settings AI", expanded=False):
-    if AIProvider:
+
+# Opencode Agent (must render first to check if active)
+if OpencodeDebate:
+    opencode_config = OpencodeDebate.render_streamlit_sidebar()
+    st.session_state.opencode_config = opencode_config
+
+opencode_active = OpencodeDebate is not None and st.session_state.get("opencode_config") is not None
+if opencode_active:
+    st.sidebar.caption("🤖 Provider LLM disattivati — AI via Opencode Agent")
+elif AIProvider:
+    with st.sidebar.expander("Settings AI", expanded=False):
         provider, model = AIProvider.render_streamlit_sidebar()
         if st.button("Applica Configurazione AI"):
             try:
@@ -58,6 +81,9 @@ with st.sidebar.expander("Settings AI", expanded=False):
                     )
                     # Hack: passiamo direttamente l'istanza configurata all'agente per sicurezza
                     st.session_state["trader_agent"].ai = st.session_state["ai_provider"]
+                    # Libera subito la knowledge caricata all'init (mai usata qui) per risparmiare ~78K tokens
+                    st.session_state["trader_agent"].knowledge = {}
+                    st.session_state["trader_agent"].knowledge_base = ""
 
                 st.toast(f"AI Attivata: {provider} ({model})", icon="🟢")
             except Exception as e:
@@ -276,7 +302,9 @@ if crypto_df is not None and not crypto_df.empty:
         st.write("") # spacing
         st.write("")
         if st.button("Genera Allocazione Smart DCA", use_container_width=True):
-            if "trader_agent" not in st.session_state or not st.session_state.get("ai_provider"):
+            ai_ready = (("trader_agent" in st.session_state and st.session_state.get("ai_provider"))
+                        or st.session_state.get("opencode_config") is not None)
+            if not ai_ready:
                 st.error("⚠️ Configura prima l'AI nella sidebar.")
             elif not selected_tokens:
                 st.warning("⚠️ Seleziona almeno un Token dalla lista.")
@@ -288,14 +316,25 @@ if crypto_df is not None and not crypto_df.empty:
                         
                 with st.spinner(f"Elaborazione Allocazione Budget AI in corso..."):
                     try:
-                        # 1. Carica Knowledge Base
-                        kb_path = os.path.join(os.path.dirname(__file__), "..", "..", "Custom_Agents", "agents", "knowledge", "crypto_asset_knowledge.md")
+                        # 1. Carica Knowledge Base (wiki crypto + opencode skills)
                         kb_content = ""
-                        if os.path.exists(kb_path):
-                            with open(kb_path, "r", encoding="utf-8") as f:
-                                kb_content = f.read()
-                        else:
-                            kb_content = "Documento 'crypto_asset_knowledge.md' non trovato. Utilizza regole generali di prudenza."
+                        if load_category and load_skills_knowledge:
+                            crypto_wiki = load_category("crypto_trading")
+                            skill_fw = load_skills_knowledge(
+                                ["crypto-technical-analysis", "crypto-crash-course",
+                                 "volume-price-analysis", "wyckoff-2-0"]
+                            )
+                            kb_content = crypto_wiki or ""
+                            if skill_fw:
+                                kb_content += "\n\n--- FRAMEWORK SKILLS ---\n" + "\n\n".join(skill_fw.values())
+                        if not kb_content:
+                            # Fallback: file statico legacy
+                            kb_path = os.path.join(os.path.dirname(__file__), "..", "..", "Custom_Agents", "agents", "knowledge", "crypto_asset_knowledge.md")
+                            if os.path.exists(kb_path):
+                                with open(kb_path, "r", encoding="utf-8") as f:
+                                    kb_content = f.read()
+                            else:
+                                kb_content = "Documento 'crypto_asset_knowledge.md' non trovato. Utilizza regole generali di prudenza."
                             
                         # 2. Crea il Prompt
                         sys_prompt_text = f"Sei un Crypto Asset Allocator specializzato. La tua conoscenza base è la seguente:\n\n{kb_content}\n\nREGOLE AGGIUNTIVE:\n- Ignora il PE Ratio (NVT) se non disponibile on-chain.\n- Decidi importi precisi in EUR per ogni token in base al budget totale, usando le formule (Volatilità, SMA50/200, Volume Trend, Moltiplicatori Smart DCA) spiegate nel testo.\n- REGOLA PRIORITARIA: Se il prezzo attuale di un token è SOTTO il prezzo medio di carico dell'investitore, quel token rappresenta un'opportunità di 'averaging down'. PREDILIGI l'allocazione verso i token dove lo sconto rispetto al prezzo di carico è maggiore, perché l'obiettivo è abbassare il più possibile il prezzo medio di carico nel breve termine.\n- Calcola e mostra sempre il NUOVO prezzo medio di carico stimato dopo l'allocazione suggerita."
@@ -345,21 +384,26 @@ if crypto_df is not None and not crypto_df.empty:
                         user_msg_text = f"Ho un BUDGET totale di {budget_fiat} EUR.\nI token candidati e le loro metriche sono i seguenti:\n{ta_summary}\n\nAnalizza tutti i token secondo i criteri della knowledge. OBIETTIVO PRIMARIO: Abbassare il più possibile il prezzo medio di carico complessivo del portafoglio nel breve termine. Fornisci un portafoglio di ripartizione con importi EUR precisi, spiegando il ragionamento per ognuno e mostrando il NUOVO prezzo medio di carico stimato dopo l'acquisto."
                         
                         # 3. Richiesta AI
-                        agent = st.session_state["trader_agent"]
                         final_prompt = f"SYSTEM: {sys_prompt_text}\n\nUSER_REQUEST: {user_msg_text}"
-                        
-                        # Use provider wrapper generically
-                        try:
-                            # AIProvider -> generate_content string
-                            if hasattr(st.session_state["ai_provider"], 'get_model'):
-                                resp = st.session_state["ai_provider"].get_model().generate_content([final_prompt])
-                                ai_response = resp.text if hasattr(resp, 'text') else str(resp)
-                            else:
-                                # Fallback se l'API non ha .get_model()
-                                ai_response = "Errore: Incompatibilità libreria AIProvider. Verifica logs."
-                        except Exception as ai_ex:
-                             # Se usiamo il pattern standard di TraderAgent:
-                             ai_response = f"Errore AI Provider: {ai_ex}. \nAssicurati che Claude o Gemini non abbiano blocchi sulle query corpose."
+
+                        ai_response = ""
+                        opencode_cfg = st.session_state.get("opencode_config")
+                        if OpencodeAgent and opencode_cfg is not None:
+                            try:
+                                oc_agent = OpencodeAgent(opencode_cfg)
+                                for chunk in oc_agent.stream_prompt(final_prompt):
+                                    ai_response += chunk
+                            except Exception as oc_ex:
+                                ai_response = f"Errore Opencode: {oc_ex}"
+                        else:
+                            try:
+                                if hasattr(st.session_state.get("ai_provider"), 'get_model'):
+                                    resp = st.session_state["ai_provider"].get_model().generate_content([final_prompt])
+                                    ai_response = resp.text if hasattr(resp, 'text') else str(resp)
+                                else:
+                                    ai_response = "Errore: Incompatibilità libreria AIProvider. Verifica logs."
+                            except Exception as ai_ex:
+                                 ai_response = f"Errore AI Provider: {ai_ex}. \nAssicurati che Claude o Gemini non abbiano blocchi sulle query corpose."
                         
                         # 4. Salva risultato in session_state per render inline
                         st.session_state["smart_dca_report"] = ai_response
@@ -402,9 +446,16 @@ if crypto_df is not None and not crypto_df.empty:
                             context += f"{prev['role'].upper()}: {prev['content']}\n"
                         context += f"\nNuova domanda dell'utente: {followup}\n\nRispondi in modo preciso e conciso, in italiano."
                         
-                        resp = st.session_state["ai_provider"].get_model().generate_content([context])
-                        answer = resp.text if hasattr(resp, 'text') else str(resp)
-                        
+                        answer = ""
+                        opencode_cfg = st.session_state.get("opencode_config")
+                        if OpencodeAgent and opencode_cfg is not None:
+                            oc_agent = OpencodeAgent(opencode_cfg)
+                            for chunk in oc_agent.stream_prompt(context):
+                                answer += chunk
+                        else:
+                            resp = st.session_state["ai_provider"].get_model().generate_content([context])
+                            answer = resp.text if hasattr(resp, 'text') else str(resp)
+
                         st.markdown(answer)
                         st.session_state["dca_chat_history"].append({"role": "assistant", "content": answer})
                     except Exception as e:
@@ -418,7 +469,7 @@ else:
 st.sidebar.divider()
 st.sidebar.header("💬 Chat Assistant")
 
-if "ai_provider" in st.session_state and st.session_state["ai_provider"]:
+if ("ai_provider" in st.session_state and st.session_state["ai_provider"]) or st.session_state.get("opencode_config") is not None:
     # Init chat history
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
@@ -461,6 +512,18 @@ if "ai_provider" in st.session_state and st.session_state["ai_provider"]:
                         # --- CONTEXT PREPARATION ---
                         system_msg = "Sei un esperto di criptovalute e investimenti."
 
+                        # Inject opencode crypto skills (avoid loading full wiki)
+                        if load_skills_knowledge:
+                            try:
+                                crypto_fw = load_skills_knowledge(
+                                    ["crypto-technical-analysis", "crypto-crash-course"]
+                                )
+                                if crypto_fw:
+                                    fw_text = "\n\n".join(crypto_fw.values())
+                                    system_msg += f"\n\nCONOSCENZA TECNICA:\n{fw_text[:3000]}"
+                            except Exception:
+                                pass
+
                         KEY_ANALYZED = "crypto_analyzed_csv"
 
                         data_context_str = ""
@@ -501,12 +564,20 @@ if "ai_provider" in st.session_state and st.session_state["ai_provider"]:
                         if len(final_prompt) == 1:
                             final_prompt = final_prompt[0]
 
-                        stream = (
-                            st.session_state["ai_provider"]
-                            .get_model()
-                            .generate_stream(final_prompt)
-                        )
-                        response = st.write_stream(stream)
+                        opencode_cfg = st.session_state.get("opencode_config")
+                        if OpencodeAgent and opencode_cfg is not None:
+                            oc_agent = OpencodeAgent(opencode_cfg)
+                            response = ""
+                            for chunk in oc_agent.stream_prompt(final_prompt):
+                                response += chunk
+                                st.write(chunk)
+                        else:
+                            stream = (
+                                st.session_state["ai_provider"]
+                                .get_model()
+                                .generate_stream(final_prompt)
+                            )
+                            response = st.write_stream(stream)
                         st.session_state.chat_history.append(
                             {"role": "assistant", "content": response}
                         )

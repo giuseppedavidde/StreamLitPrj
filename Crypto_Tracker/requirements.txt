@@ -6,5 +6,5 @@ pycoingecko
 requests
 PyGithub
 python-dotenv
-git+https://github.com/giuseppedavidde/Custom_Agents.git#egg=custom_agents
-#-e ../../Custom_Agents/
+#git+https://github.com/giuseppedavidde/Custom_Agents.git#egg=custom_agents
+-e ../../Custom_Agents/
