@@ -33,46 +33,48 @@ if "fx_cache" not in st.session_state:
     st.session_state.fx_cache = {}
 
 
-def create_pdf_report(report_data):
-    """
-    Generates a professional PDF report for fiscal summary.
-    """
+def create_pdf_report(report_data, country="🇦🇹 Austria"):
+    """Generate a professional PDF report for fiscal summary (country-aware)."""
     pdf = FPDF()
     pdf.add_page()
-    
-    # Title
+
+    is_at = "Austria" in country
     pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 15, "IBKR Tax Statement - Fiscal Summary", ln=True, align="C")
+    title = "IBKR Tax Statement - E1kv (Austria)" if is_at else "IBKR Tax Statement - Quadro RT (Italia)"
+    pdf.cell(0, 15, title, ln=True, align="C")
     pdf.ln(5)
-    
-    # Subtitle
+
     pdf.set_font("Arial", "I", 12)
     pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align="C")
     pdf.ln(10)
-    
-    # Section Header
+
     pdf.set_font("Arial", "B", 14)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, "Summary Data", ln=True, fill=True)
     pdf.ln(5)
-    
-    # Data Table
+
     pdf.set_font("Arial", "", 11)
     for key, value in report_data.items():
-        if isinstance(value, float):
-            val_str = f"{value:,.2f}"
-        else:
-            val_str = str(value)
-            
+        val_str = f"{value:,.2f}" if isinstance(value, float) else str(value)
         pdf.set_font("Arial", "B", 11)
         pdf.cell(80, 8, f"{key}:", border="B")
         pdf.set_font("Arial", "", 11)
         pdf.cell(0, 8, val_str, border="B", ln=True, align="R")
-    
+
     pdf.ln(20)
     pdf.set_font("Arial", "I", 9)
-    pdf.multi_cell(0, 5, "Disclaimer: This report is automatically generated based on the provided IBKR CSV and ECB exchange rates. It is intended for informational purposes and should be reviewed by a qualified tax advisor before submission to official authorities.")
-    
+    disclaimer = (
+        "Disclaimer: This report is automatically generated based on the provided IBKR CSV and ECB "
+        "exchange rates. It is intended for informational purposes and should be reviewed by a "
+        "qualified tax advisor before submission to the competent tax authorities."
+    ) if is_at else (
+        "Disclaimer: Il presente report è generato automaticamente sulla base dei dati IBKR e dei "
+        "tassi di cambio BCE. Ha valore puramente informativo e deve essere verificato da un "
+        "commercialista o consulente fiscale abilitato prima del versamento dell'imposta sostitutiva "
+        "e della presentazione del Quadro RT/RW."
+    )
+    pdf.multi_cell(0, 5, disclaimer)
+
     return bytes(pdf.output())
 
 
@@ -419,8 +421,14 @@ def _chat_with_ai(user_message: str, data: dict) -> str:
         role = "User" if msg["role"] == "user" else "Analyst"
         history_text += f"\n{role}: {msg['content']}\n"
 
+    tax_country = st.session_state.get("tax_country", "🇦🇹 Austria")
+    if "Italia" in tax_country:
+        tax_context_prompt = "tassazione italiana (26% capital gains, Quadro RT)"
+    else:
+        tax_context_prompt = "tassazione austriaca (KESt 27,5%, E1kv)"
+
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    prompt = f"""Sei un consulente fiscale e analista finanziario esperto in tassazione austriaca (KESt 27.5%) e tassazione italiana (26% capital gains).
+    prompt = f"""Sei un consulente fiscale e analista finanziario esperto in {tax_context_prompt}.
 Oggi è il {today_str}.
 
 Hai accesso ai seguenti dati REALI del rendiconto IBKR annuale:
@@ -451,6 +459,17 @@ ISTRUZIONI:
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
 st.sidebar.title("📊 IBKR Tax Calculator")
+
+if "tax_country" not in st.session_state:
+    st.session_state.tax_country = "🇦🇹 Austria"
+
+st.sidebar.radio(
+    "Paese di residenza fiscale",
+    ["🇦🇹 Austria", "🇮🇹 Italia"],
+    key="tax_country",
+)
+st.sidebar.markdown("---")
+
 uploaded_file = st.sidebar.file_uploader("Carica rendiconto IBKR (CSV)", type=["csv"])
 
 if uploaded_file:
@@ -798,86 +817,193 @@ with tab_fiscal:
         col3.metric("📉 Perdite Lorde (IBKR)", f"€{total_realized_loss:,.2f}")
         col4.metric("⏳ P/L Non Realizzato", f"€{total_unrealized:+,.2f}")
 
-        # ── Austrian KESt split by §27 Abs.3 vs §27 Abs.4 ──────────────────
+        tax_country = st.session_state.get("tax_country", "🇦🇹 Austria")
+
+        # ── Country-specific fiscal detail ──────────────────────────────────
         st.markdown("---")
-        st.markdown("### 🇦🇹 Finanzonline — Modulo E1kv (KESt 27.5%)")
-        st.info(
-            "⚖️ La legge austriaca (§ 27 EStG) richiede che **profitti e perdite siano inseriti "
-            "SEPARATAMENTE** (nicht saldiert) e che vengano distinti per categoria:\n\n"
-            "- **§ 27 Abs. 3** → Azioni, ETF, Fondi → KZ **994** (Überschüsse) + KZ **892** (Verluste)\n"
-            "- **§ 27 Abs. 4** → Derivati, Opzioni, Certificati → KZ **995** (Überschüsse) + KZ **896** (Verluste)"
-        )
 
-        if has_fx_conversion and not trades_eur_df.empty:
+        if "Austria" in tax_country:
+            st.markdown("### 🇦🇹 Finanzonline — Modulo E1kv (KESt 27,5%)")
+            st.info(
+                "⚖️ La legge austriaca (§ 27 EStG) richiede che **profitti e perdite siano inseriti "
+                "SEPARATAMENTE** (nicht saldiert) e che vengano distinti per categoria:\n\n"
+                "- **§ 27 Abs. 3** → Azioni, ETF, Fondi → KZ **994** (Überschüsse) + KZ **892** (Verluste)\n"
+                "- **§ 27 Abs. 4** → Derivati, Opzioni, Certificati → KZ **995** (Überschüsse) + KZ **896** (Verluste)"
+            )
 
-            # ── Classify trades by Austrian tax category ─────────────────────
-            # IBKR asset_type strings (Italian UI): map to tax category
-            DERIVATE_KEYWORDS = [
-                "opzion", "option", "derivat", "future", "warrant",
-                "certificat", "cfd", "swap",
-            ]
+            if has_fx_conversion and not trades_eur_df.empty:
+                DERIVATE_KEYWORDS = [
+                    "opzion", "option", "derivat", "future", "warrant",
+                    "certificat", "cfd", "swap",
+                ]
 
-            def _classify_at(asset_type: str) -> str:
-                """Return 'derivate' or 'aktien' based on IBKR asset_type string."""
-                at_lower = str(asset_type).lower()
-                if any(k in at_lower for k in DERIVATE_KEYWORDS):
-                    return "derivate"
-                return "aktien"
+                def _classify_at(asset_type: str) -> str:
+                    at_lower = str(asset_type).lower()
+                    if any(k in at_lower for k in DERIVATE_KEYWORDS):
+                        return "derivate"
+                    return "aktien"
 
-            t_df = trades_eur_df.copy()
-            t_df["at_category"] = t_df["asset_type"].apply(_classify_at)
+                t_df = trades_eur_df.copy()
+                t_df["at_category"] = t_df["asset_type"].apply(_classify_at)
+                t_closed = t_df[t_df["realized_pl_eur"] != 0].copy()
 
-            # Filter only closed trades (realized P/L ≠ 0)
-            t_closed = t_df[t_df["realized_pl_eur"] != 0].copy()
+                for cat, label_it, label_de, kz_profit, kz_loss, par in [
+                    ("aktien",  "📈 Azioni / ETF / Fondi",       "§ 27 Abs. 3 EStG",  994, 892, 3),
+                    ("derivate","⚡ Derivati / Opzioni / Futures","§ 27 Abs. 4 EStG",  995, 896, 4),
+                ]:
+                    cat_df = t_closed[t_closed["at_category"] == cat]
+                    gross_profit = cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
+                    gross_loss   = cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum()
+                    net          = gross_profit + gross_loss
+                    kest_net     = max(net, 0) * 0.275
+                    n            = len(cat_df)
 
-            for cat, label_it, label_de, kz_profit, kz_loss, par in [
-                ("aktien",  "📈 Azioni / ETF / Fondi",       "§ 27 Abs. 3 EStG",  994, 892, 3),
-                ("derivate","⚡ Derivati / Opzioni / Futures","§ 27 Abs. 4 EStG",  995, 896, 4),
-            ]:
-                cat_df = t_closed[t_closed["at_category"] == cat]
+                    st.markdown(f"#### {label_it} — *{label_de}*")
+                    if n == 0:
+                        st.caption(f"Nessun trade chiuso in questa categoria ({cat}).")
+                        continue
 
-                gross_profit = cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
-                gross_loss   = cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum()  # negative
-                net          = gross_profit + gross_loss
-                kest_net     = max(net, 0) * 0.275   # KeSt on NET gain; 0 if net loss
-                n            = len(cat_df)
-
-                st.markdown(f"#### {label_it} — *{label_de}*")
-                if n == 0:
-                    st.caption(f"Nessun trade chiuso in questa categoria ({cat}).")
-                    continue
-
-                col_l, col_r = st.columns(2)
-                with col_l:
-                    st.markdown(f"""
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        st.markdown(f"""
 | Campo Finanzonline | KZ | Importo EUR |
 |---|---|---|
 | Überschüsse 27,5% *(profitti lordi)* | **{kz_profit}** | **€ {gross_profit:,.2f}** |
 | Verluste *(perdite lorde, con segno -)* | **{kz_loss}** | **€ {gross_loss:,.2f}** |
 | Netto (solo informativo, NON da inserire) | — | € {net:+,.2f} |
-| KeSt stimata sul netto (27.5%) | — | € {kest_net:,.2f} |
+| KeSt stimata sul netto (27,5%) | — | € {kest_net:,.2f} |
 """)
-                with col_r:
-                    # Mini metric cards
-                    st.metric(f"KZ {kz_profit} — Überschüsse", f"€ {gross_profit:,.2f}",
-                              help=f"Inserire in Finanzonline → E1kv → KZ {kz_profit}")
-                    st.metric(f"KZ {kz_loss} — Verluste", f"€ {gross_loss:,.2f}",
-                              help=f"Inserire con segno NEGATIVO in Finanzonline → E1kv → KZ {kz_loss}")
+                    with col_r:
+                        st.metric(f"KZ {kz_profit} — Überschüsse", f"€ {gross_profit:,.2f}",
+                                  help=f"Inserire in Finanzonline → E1kv → KZ {kz_profit}")
+                        st.metric(f"KZ {kz_loss} — Verluste", f"€ {gross_loss:,.2f}",
+                                  help=f"Inserire con segno NEGATIVO in Finanzonline → E1kv → KZ {kz_loss}")
 
-                st.caption(
-                    f"⚠️ **N.B.:** Inserire KZ {kz_profit} e KZ {kz_loss} **separatamente** (nicht saldiert). "
-                    f"Non sommarli. Operazioni incluse: {n}."
-                )
-                st.markdown("")
+                    st.caption(
+                        f"⚠️ **N.B.:** Inserire KZ {kz_profit} e KZ {kz_loss} **separatamente** (nicht saldiert). "
+                        f"Non sommarli. Operazioni incluse: {n}."
+                    )
+                    st.markdown("")
 
-        else:
-            kest_rate = 0.275
-            kest_due  = max(net_taxable * kest_rate, 0) if net_taxable > 0 else 0
-            st.markdown(f"""
+            else:
+                kest_rate = 0.275
+                kest_due  = max(net_taxable * kest_rate, 0) if net_taxable > 0 else 0
+                st.markdown(f"""
 | Voce | Importo |
 |------|---------|
 | {net_taxable_label} | €{net_taxable:+,.2f} |
-| KESt stimata (27.5%) | **€{kest_due:,.2f}** |
+| KESt stimata (27,5%) | **€{kest_due:,.2f}** |
+""")
+
+        else:
+            st.markdown("### 🇮🇹 Quadro RT — REDDITI PF (Imposta Sostitutiva 26%)")
+            st.info(
+                "⚖️ La normativa italiana (Art. 67, comma 1, TUIR) richiede la "
+                "classificazione delle plusvalenze/minusvalenze per categoria:\n\n"
+                "- **Non qualificate** (Azioni, ETF, Obbligazioni) → Rigo **RT51** (plus) / **RT53** (minus)\n"
+                "- **Derivati** (Opzioni, Futures, Warrant, Certificati) → Rigo **RT31** (plus) / **RT32** (minus)\n"
+                "- **Cripto-attività** → Rigo **RT88** (plus) / **RT89** (minus)"
+            )
+
+            if has_fx_conversion and not trades_eur_df.empty:
+                DERIVATE_KEYWORDS = [
+                    "opzion", "option", "derivat", "future", "warrant",
+                    "certificat", "cfd", "swap",
+                ]
+                CRYPTO_KEYWORDS = ["crypto", "cripto"]
+
+                def _classify_it(asset_type: str) -> str:
+                    at_lower = str(asset_type).lower()
+                    if any(k in at_lower for k in CRYPTO_KEYWORDS):
+                        return "crypto"
+                    if any(k in at_lower for k in DERIVATE_KEYWORDS):
+                        return "derivatives"
+                    return "non_qualified"
+
+                t_df = trades_eur_df.copy()
+                t_df["it_category"] = t_df["asset_type"].apply(_classify_it)
+                t_closed = t_df[t_df["realized_pl_eur"] != 0].copy()
+
+                IT_CATEGORIES = [
+                    ("non_qualified", "📈 Azioni / ETF / Obbligazioni", "RT51", "RT53", 0.26),
+                    ("derivatives",   "⚡ Derivati / Opzioni / Futures", "RT31", "RT32", 0.26),
+                    ("crypto",        "₿ Cripto-attività",             "RT88", "RT89", 0.26),
+                ]
+
+                for cat, label_it, rigo_plus, rigo_minus, aliquota in IT_CATEGORIES:
+                    cat_df = t_closed[t_closed["it_category"] == cat]
+                    gross_profit = cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
+                    gross_loss   = cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum()
+                    net          = gross_profit + gross_loss
+                    imposta      = max(net, 0) * aliquota
+                    n            = len(cat_df)
+
+                    st.markdown(f"#### {label_it}")
+                    if n == 0:
+                        st.caption(f"Nessun trade chiuso in questa categoria ({cat}).")
+                        continue
+
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        st.markdown(f"""
+| Campo Quadro RT | Rigo | Importo EUR |
+|---|---|---|
+| Plusvalenze {aliquota*100:.0f}% | **{rigo_plus}** | **€ {gross_profit:,.2f}** |
+| Minusvalenze | **{rigo_minus}** | **€ {gross_loss:,.2f}** |
+| Netto (solo informativo) | — | € {net:+,.2f} |
+| Imposta sostitutiva ({aliquota*100:.0f}%) | — | € {imposta:,.2f} |
+| Codice tributo F24 | — | **1100** |
+""")
+                    with col_r:
+                        st.metric(f"Rigo {rigo_plus} — Plusvalenze", f"€ {gross_profit:,.2f}",
+                                  help=f"Inserire in REDDITI PF → Quadro RT → Rigo {rigo_plus}")
+                        st.metric(f"Rigo {rigo_minus} — Minusvalenze", f"€ {gross_loss:,.2f}",
+                                  help=f"Inserire in REDDITI PF → Quadro RT → Rigo {rigo_minus}")
+
+                    st.caption(
+                        f"⚠️ **N.B.:** Plusvalenze e minusvalenze vanno inserite **separatamente** nei rispettivi righi. "
+                        f"Operazioni incluse: {n}. Minusvalenze riportabili 4 periodi d'imposta."
+                    )
+                    st.markdown("")
+
+                # ── RW Monitoring for Italy ──────────────────────────────────
+                st.markdown("---")
+                st.subheader("🌍 Monitoraggio RW — Investimenti Esteri")
+                st.info(
+                    "Obbligatorio se il **valore medio** degli investimenti esteri "
+                    "supera € 15.000 (Art. 4, DL 167/1990)."
+                )
+
+                if not trades_eur_df.empty:
+                    total_proceeds = trades_eur_df["proceeds_eur"].sum()
+                    total_cost = trades_eur_df["cost_basis_eur"].sum()
+                    avg_value = max(total_proceeds, total_cost) * 0.5
+
+                    if avg_value > 15000:
+                        ivafe = max(avg_value * 0.002, 0)
+                        st.markdown(f"""
+| Campo RW | Valore |
+|---|---|
+| Valore medio investimenti esteri | € {avg_value:,.2f} |
+| Soglia monitoraggio (€ 15.000) | ✅ Superata |
+| IVAFE dovuta (0,20%) | **€ {ivafe:,.2f}** |
+| Rigo RW | **RW1 — RW4** |
+| Sezione | I-A (Patrimoni finanziari) |
+""")
+                    else:
+                        st.success(
+                            f"✅ Valore medio € {avg_value:,.2f} — sotto la soglia di € 15.000. "
+                            "Monitoraggio RW non dovuto."
+                        )
+
+            else:
+                imposta_it = max(net_taxable * 0.26, 0) if net_taxable > 0 else 0
+                st.markdown(f"""
+| Voce | Importo |
+|------|---------|
+| {net_taxable_label} | €{net_taxable:+,.2f} |
+| Imposta sostitutiva (26%) | **€{imposta_it:,.2f}** |
+| Codice tributo F24 | **1100** |
 """)
 
 
@@ -900,125 +1026,158 @@ with tab_fiscal:
                 lambda r: f"1 USD = {1/r:.4f} EUR" if r and r != 1.0 else "N/A"
             )
 
-            # Reuse the same classification from the E1kv section above
             DERIVATE_KEYWORDS = [
                 "opzion", "option", "derivat", "future", "warrant",
                 "certificat", "cfd", "swap",
             ]
-            def _classify(at: str) -> str:
-                return "derivate" if any(k in str(at).lower() for k in DERIVATE_KEYWORDS) else "aktien"
+            CRYPTO_KEYWORDS = ["crypto", "cripto"]
 
-            detail_df["at_category"] = detail_df["asset_type"].apply(_classify)
+            tax_country = st.session_state.get("tax_country", "🇦🇹 Austria")
 
-            # Only closed trades
-            detail_closed = detail_df[detail_df["realized_pl_eur"] != 0].copy()
+            if "Austria" in tax_country:
+                def _classify(at: str) -> str:
+                    return "derivate" if any(k in str(at).lower() for k in DERIVATE_KEYWORDS) else "aktien"
 
-            _FMT = {
-                "Qtà": "{:,.4f}",
-                "Prezzo": "{:,.4f}",
-                "P/L (USD)": "{:+,.2f} $",
-                "P/L (EUR)": "€{:+,.2f}",
-                "Comm. (EUR)": "€{:,.2f}",
-            }
+                detail_df["cat"] = detail_df["asset_type"].apply(_classify)
+                detail_closed = detail_df[detail_df["realized_pl_eur"] != 0].copy()
 
-            for cat, emoji, label_it, label_de, kz_profit, kz_loss in [
-                ("aktien",  "📈", "Azioni / ETF / Fondi",        "§ 27 Abs. 3 EStG", 994, 892),
-                ("derivate","⚡", "Derivati / Opzioni / Futures", "§ 27 Abs. 4 EStG", 995, 896),
-            ]:
-                cat_rows = detail_closed[detail_closed["at_category"] == cat].sort_values(
-                    ["data_operazione", "symbol"]
-                )
+                _FMT = {
+                    "Qtà": "{:,.4f}", "Prezzo": "{:,.4f}",
+                    "P/L (USD)": "{:+,.2f} $", "P/L (EUR)": "€{:+,.2f}", "Comm. (EUR)": "€{:,.2f}",
+                }
 
-                gross_profit = cat_rows[cat_rows["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
-                gross_loss   = cat_rows[cat_rows["realized_pl_eur"] < 0]["realized_pl_eur"].sum()
-                net          = gross_profit + gross_loss
-
-                st.markdown(f"#### {emoji} {label_it} — *{label_de}*")
-
-                if cat_rows.empty:
-                    st.caption("Nessuna operazione chiusa in questa categoria.")
-                    continue
-
-                # Build display dataframe
-                disp = cat_rows[[
-                    "data_operazione", "symbol", "asset_type", "currency",
-                    "quantity", "price",
-                    "realized_pl", "tasso_leggibile", "tasso_inverso", "data_tasso_ecb",
-                    "realized_pl_eur", "commission_eur",
-                ]].copy()
-                disp.columns = [
-                    "Giorno Operazione", "Simbolo", "Tipo", "Val.",
-                    "Qtà", "Prezzo",
-                    "P/L (USD)", "Cambio BCE (÷)", "Cambio BCE (×)", "Data Tasso ECB",
-                    "P/L (EUR)", "Comm. (EUR)",
+                AT_LOOP = [
+                    ("aktien", "📈", "Azioni / ETF / Fondi", "§ 27 Abs. 3 EStG", 994, 892),
+                    ("derivate", "⚡", "Derivati / Opzioni / Futures", "§ 27 Abs. 4 EStG", 995, 896),
                 ]
 
-                st.dataframe(
-                    disp.style.format(_FMT).map(
-                        lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0
-                                  else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0
-                                  else "",
-                        subset=["P/L (EUR)"]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(500, max(150, len(disp) * 38)),
+                for cat, emoji, label_it, label_de, kz_profit, kz_loss in AT_LOOP:
+                    cat_rows = detail_closed[detail_closed["cat"] == cat].sort_values(
+                        ["data_operazione", "symbol"]
+                    )
+                    gross_profit = cat_rows[cat_rows["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
+                    gross_loss   = cat_rows[cat_rows["realized_pl_eur"] < 0]["realized_pl_eur"].sum()
+                    net          = gross_profit + gross_loss
+
+                    st.markdown(f"#### {emoji} {label_it} — *{label_de}*")
+                    if cat_rows.empty:
+                        st.caption("Nessuna operazione chiusa in questa categoria.")
+                        continue
+
+                    disp = cat_rows[["data_operazione", "symbol", "asset_type", "currency",
+                        "quantity", "price", "realized_pl", "tasso_leggibile", "tasso_inverso",
+                        "data_tasso_ecb", "realized_pl_eur", "commission_eur"]].copy()
+                    disp.columns = ["Giorno Operazione", "Simbolo", "Tipo", "Val.",
+                        "Qtà", "Prezzo", "P/L (USD)", "Cambio BCE (÷)", "Cambio BCE (×)",
+                        "Data Tasso ECB", "P/L (EUR)", "Comm. (EUR)"]
+
+                    st.dataframe(
+                        disp.style.format(_FMT).map(
+                            lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0
+                                      else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0
+                                      else "",
+                            subset=["P/L (EUR)"]
+                        ), use_container_width=True, hide_index=True,
+                        height=min(500, max(150, len(disp) * 38)),
+                    )
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric(f"✅ KZ {kz_profit} Überschüsse", f"€ {gross_profit:,.2f}",
+                              help=f"Inserire in Finanzonline KZ {kz_profit}")
+                    c2.metric(f"🔴 KZ {kz_loss} Verluste", f"€ {gross_loss:,.2f}",
+                              help=f"Inserire in Finanzonline KZ {kz_loss}")
+                    c3.metric("Netto (info)", f"€ {net:+,.2f}",
+                              help="Solo informativo — non corrisponde a un campo Finanzonline")
+                    c4.metric("KeSt stimata (27,5%)", f"€ {max(net, 0) * 0.275:,.2f}",
+                              help="KeSt = max(Netto, 0) × 27,5%")
+                    st.markdown("")
+
+                st.caption(
+                    "I totali KZ corrispondono al riepilogo Finanzonline E1kv qui sopra."
                 )
 
-                # Totals row — must match the KZ values in the E1kv section above
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric(
-                    f"✅ KZ {kz_profit} Überschüsse",
-                    f"€ {gross_profit:,.2f}",
-                    help=f"Somma profitti lordi → inserire in Finanzonline KZ {kz_profit}",
-                )
-                c2.metric(
-                    f"🔴 KZ {kz_loss} Verluste",
-                    f"€ {gross_loss:,.2f}",
-                    help=f"Somma perdite lorde (negativo) → inserire in Finanzonline KZ {kz_loss}",
-                )
-                c3.metric(
-                    "Netto (info)",
-                    f"€ {net:+,.2f}",
-                    help="Solo informativo — non corrisponde a nessun campo Finanzonline",
-                )
-                c4.metric(
-                    "KeSt stimata sul netto (27.5%)",
-                    f"€ {max(net, 0) * 0.275:,.2f}",
-                    help="KeSt = max(Netto, 0) × 27.5%  — se il netto è negativo la KeSt è 0",
-                )
-                st.markdown("")  # spacer between categories
+            else:
+                def _classify_it_local(at: str) -> str:
+                    at_lower = str(at).lower()
+                    if any(k in at_lower for k in CRYPTO_KEYWORDS):
+                        return "crypto"
+                    if any(k in at_lower for k in DERIVATE_KEYWORDS):
+                        return "derivatives"
+                    return "non_qualified"
 
-            st.caption(
-                "📐 **Formula:** P/L (EUR) = P/L (USD) ÷ tasso BCE  "
-                "→ **Cambio BCE (÷)** = divisore (es. *1 EUR = 1.0850 USD*) | "
-                "**Cambio BCE (×)** = reciproco (es. *1 USD = 0.9216 EUR*).  "
-                "I totali KZ mostrati qui sotto ogni tabella corrispondono esattamente a quelli "
-                "del riepilogo Finanzonline E1kv qui sopra."
-            )
+                detail_df["cat"] = detail_df["asset_type"].apply(_classify_it_local)
+                detail_closed = detail_df[detail_df["realized_pl_eur"] != 0].copy()
 
-            # Bar chart aggregated by symbol (overview)
+                _FMT = {
+                    "Qtà": "{:,.4f}", "Prezzo": "{:,.4f}",
+                    "P/L (USD)": "{:+,.2f} $", "P/L (EUR)": "€{:+,.2f}", "Comm. (EUR)": "€{:,.2f}",
+                }
+
+                IT_LOOP = [
+                    ("non_qualified", "📈", "Azioni / ETF / Obbligazioni", "RT51", "RT53", 0.26),
+                    ("derivatives", "⚡", "Derivati / Opzioni / Futures", "RT31", "RT32", 0.26),
+                    ("crypto", "₿", "Cripto-attività", "RT88", "RT89", 0.26),
+                ]
+
+                for cat, emoji, label_it, rigo_plus, rigo_minus, aliquota in IT_LOOP:
+                    cat_rows = detail_closed[detail_closed["cat"] == cat].sort_values(
+                        ["data_operazione", "symbol"]
+                    )
+                    gross_profit = cat_rows[cat_rows["realized_pl_eur"] > 0]["realized_pl_eur"].sum()
+                    gross_loss   = cat_rows[cat_rows["realized_pl_eur"] < 0]["realized_pl_eur"].sum()
+                    net          = gross_profit + gross_loss
+
+                    st.markdown(f"#### {emoji} {label_it}")
+                    if cat_rows.empty:
+                        st.caption("Nessuna operazione chiusa in questa categoria.")
+                        continue
+
+                    disp = cat_rows[["data_operazione", "symbol", "asset_type", "currency",
+                        "quantity", "price", "realized_pl", "tasso_leggibile", "tasso_inverso",
+                        "data_tasso_ecb", "realized_pl_eur", "commission_eur"]].copy()
+                    disp.columns = ["Giorno Operazione", "Simbolo", "Tipo", "Val.",
+                        "Qtà", "Prezzo", "P/L (USD)", "Cambio BCE (÷)", "Cambio BCE (×)",
+                        "Data Tasso ECB", "P/L (EUR)", "Comm. (EUR)"]
+
+                    st.dataframe(
+                        disp.style.format(_FMT).map(
+                            lambda v: "color: #2ecc71; font-weight: bold" if isinstance(v, (int, float)) and v > 0
+                                      else "color: #e74c3c; font-weight: bold" if isinstance(v, (int, float)) and v < 0
+                                      else "",
+                            subset=["P/L (EUR)"]
+                        ), use_container_width=True, hide_index=True,
+                        height=min(500, max(150, len(disp) * 38)),
+                    )
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric(f"✅ Rigo {rigo_plus} — Plusvalenze", f"€ {gross_profit:,.2f}",
+                              help=f"Inserire in REDDITI PF → Quadro RT → Rigo {rigo_plus}")
+                    c2.metric(f"🔴 Rigo {rigo_minus} — Minusvalenze", f"€ {gross_loss:,.2f}",
+                              help=f"Inserire in REDDITI PF → Quadro RT → Rigo {rigo_minus}")
+                    c3.metric("Netto (info)", f"€ {net:+,.2f}", help="Solo informativo")
+                    c4.metric(f"Imposta sost. ({aliquota*100:.0f}%)", f"€ {max(net, 0) * aliquota:,.2f}",
+                              help=f"Cod. tributo F24: 1100")
+                    st.markdown("")
+
+                st.caption(
+                    "I totali per rigo RT corrispondono al riepilogo Quadro RT qui sopra."
+                )
+
+            # Bar chart aggregated by symbol — shared for both countries
             sym_eur = (
                 trades_eur_df[trades_eur_df["realized_pl_eur"] != 0]
-                .groupby("symbol")
-                .agg(pl_eur=("realized_pl_eur", "sum"))
-                .reset_index()
-                .sort_values("pl_eur", ascending=True)
+                .groupby("symbol").agg(pl_eur=("realized_pl_eur", "sum"))
+                .reset_index().sort_values("pl_eur", ascending=True)
             )
             colors_sym = ["#2ecc71" if v >= 0 else "#e74c3c" for v in sym_eur["pl_eur"]]
             fig_sym = go.Figure(go.Bar(
-                x=sym_eur["pl_eur"],
-                y=sym_eur["symbol"],
-                orientation="h",
+                x=sym_eur["pl_eur"], y=sym_eur["symbol"], orientation="h",
                 marker_color=colors_sym,
-                text=[f"€{v:+,.2f}" for v in sym_eur["pl_eur"]],
-                textposition="auto",
+                text=[f"€{v:+,.2f}" for v in sym_eur["pl_eur"]], textposition="auto",
             ))
             fig_sym.update_layout(
                 title="P/L Realizzato per Simbolo (EUR — tassi ECB giornalieri)",
-                xaxis_title="EUR",
-                height=max(400, len(sym_eur) * 35),
-                margin=dict(l=180),
+                xaxis_title="EUR", height=max(400, len(sym_eur) * 35), margin=dict(l=180),
             )
             st.plotly_chart(fig_sym, use_container_width=True)
 
@@ -1067,8 +1226,12 @@ with tab_fiscal:
     # ── Final Reporting Section ──────────────────────────────────────────────
     st.markdown("---")
     st.subheader("📥 Esportazione Report Fiscale")
-    st.info("Genera un riepilogo in formato JSON o PDF dei campi KZ richiesti per Finanzonline.")
-    
+    rpt_country = st.session_state.get("tax_country", "🇦🇹 Austria")
+    if "Austria" in rpt_country:
+        st.info("Genera un riepilogo in formato JSON o PDF dei campi KZ richiesti per Finanzonline (E1kv).")
+    else:
+        st.info("Genera un riepilogo in formato JSON o PDF dei dati Quadro RT per REDDITI PF (Italia).")
+
     # Aggregate data for reporting
     report_dict = {
         "Account": acc.get("Nome", "N/A"),
@@ -1077,17 +1240,40 @@ with tab_fiscal:
         "Report Date": datetime.date.today().strftime("%Y-%m-%d"),
         "Net Realized P/L (EUR)": round(net_taxable, 2) if 'net_taxable' in locals() else 0.0,
     }
-    
-    # Add KZ specific metrics if they exist
-    if 't_df' in locals() and not t_df.empty:
-        for cat, label, kz_p, kz_l in [("aktien", "Stocks/ETFs/Funds", 994, 892), ("derivate", "Derivatives/Options", 995, 896)]:
-            cat_df = t_closed[t_closed["at_category"] == cat]
-            report_dict[f"{label} - KZ {kz_p} (Profits)"] = round(cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum(), 2)
-            report_dict[f"{label} - KZ {kz_l} (Losses)"] = round(cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum(), 2)
+
+    # Add country-specific metrics
+    try:
+        if 't_closed' in locals() and t_closed is not None and not t_closed.empty:
+            if "Austria" in rpt_country and "at_category" in t_closed.columns:
+                for cat, label, kz_p, kz_l in [
+                    ("aktien", "Stocks/ETFs/Funds", 994, 892),
+                    ("derivate", "Derivatives/Options", 995, 896),
+                ]:
+                    cat_df = t_closed[t_closed["at_category"] == cat]
+                    report_dict[f"{label} - KZ {kz_p} (Profits)"] = round(
+                        cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum(), 2
+                    )
+                    report_dict[f"{label} - KZ {kz_l} (Losses)"] = round(
+                        cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum(), 2
+                    )
+            elif "it_category" in t_closed.columns:
+                for cat, label, rigo_p, rigo_l in [
+                    ("non_qualified", "Non-qualified", "RT51", "RT53"),
+                    ("derivatives", "Derivatives", "RT31", "RT32"),
+                    ("crypto", "Crypto", "RT88", "RT89"),
+                ]:
+                    cat_df = t_closed[t_closed["it_category"] == cat]
+                    report_dict[f"{label} - {rigo_p} (Gains)"] = round(
+                        cat_df[cat_df["realized_pl_eur"] > 0]["realized_pl_eur"].sum(), 2
+                    )
+                    report_dict[f"{label} - {rigo_l} (Losses)"] = round(
+                        cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum(), 2
+                    )
+    except (NameError, AttributeError):
+        pass
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        # Convert all numeric values to standard float for JSON serialization
         def clean_val(v):
             try:
                 import numpy as np
@@ -1096,9 +1282,9 @@ with tab_fiscal:
             except ImportError:
                 pass
             return v
-            
+
         json_ready_report = {k: clean_val(v) for k, v in report_dict.items()}
-        
+
         st.download_button(
             label="💾 Scarica Report JSON",
             data=json.dumps(json_ready_report, indent=4),
@@ -1106,7 +1292,7 @@ with tab_fiscal:
             mime="application/json"
         )
     with col_btn2:
-        pdf_data = create_pdf_report(report_dict)
+        pdf_data = create_pdf_report(report_dict, rpt_country)
         st.download_button(
             label="📄 Scarica Report PDF",
             data=pdf_data,
@@ -1135,7 +1321,12 @@ with tab_ai:
                 st.session_state.quick_prompt = "Analizza tutti i miei trade in perdita. Per ognuno, spiega cosa è andato storto, identifica pattern di errore comuni e suggerisci miglioramenti concreti."
         with qcol2:
             if st.button("🏛️ Riepilogo fiscale completo", use_container_width=True):
-                st.session_state.quick_prompt = "Fornisci un riepilogo fiscale completo: P/L realizzato netto, tasse da pagare (Austria 27.5% e Italia 26%), commissioni deducibili, e impatto del cambio EUR/USD."
+                tax_q = st.session_state.get("tax_country", "🇦🇹 Austria")
+                if "Italia" in tax_q:
+                    tax_info = "tasse da pagare (Italia 26%)"
+                else:
+                    tax_info = "tasse da pagare (Austria 27,5%)"
+                st.session_state.quick_prompt = f"Fornisci un riepilogo fiscale completo: P/L realizzato netto, {tax_info}, commissioni deducibili, e impatto del cambio EUR/USD."
         with qcol3:
             if st.button("🎯 Migliori e peggiori trade", use_container_width=True):
                 st.session_state.quick_prompt = "Elenca i 5 migliori e i 5 peggiori trade dell'anno con analisi dettagliata di cosa ha funzionato e cosa no."
