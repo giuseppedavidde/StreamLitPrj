@@ -103,18 +103,27 @@ def enrich_trades_with_eur(data: dict) -> None:
       - proceeds_eur   : proceeds converted to EUR
       - cost_basis_eur : cost_basis converted to EUR
 
-    For trades already in EUR (currency != 'USD') the rate is set to 1.0.
+    Also converts interest rows to EUR using ECB rates and stores
+    `interests_total_eur_bce` in data.
+
+    For items already in EUR (currency != 'USD') the rate is set to 1.0.
     """
     trades = data.get("trades", [])
-    if not trades:
-        return
+    interests = data.get("interests", [])
 
-    # Collect all unique dates where currency is USD
+    # Collect all unique dates where currency is USD (trades + interests)
     usd_dates = set()
     for t in trades:
         if t.get("currency", "USD") == "USD":
             try:
                 dt = datetime.date.fromisoformat(str(t["datetime"])[:10])
+                usd_dates.add(dt)
+            except ValueError:
+                pass
+    for i in interests:
+        if i.get("currency", "USD") == "USD":
+            try:
+                dt = datetime.date.fromisoformat(str(i["date"])[:10])
                 usd_dates.add(dt)
             except ValueError:
                 pass
@@ -170,6 +179,22 @@ def enrich_trades_with_eur(data: dict) -> None:
         t["proceeds_eur"] = t["proceeds"] / rate if rate else t["proceeds"]
         t["cost_basis_eur"] = t["cost_basis"] / rate if rate else t["cost_basis"]
 
+    # Convert interest rows to EUR using ECB rates
+    total_eur_bce = 0.0
+    for i in interests:
+        currency = i.get("currency", "USD")
+        if currency == "EUR":
+            i["amount_eur_bce"] = i["amount"]
+        else:
+            try:
+                dt = datetime.date.fromisoformat(str(i.get("date", ""))[:10])
+            except (ValueError, TypeError):
+                dt = None
+            rate = _get_cached_rate(dt) if dt else 1.0
+            i["amount_eur_bce"] = i["amount"] / rate if rate else i["amount"]
+        total_eur_bce += i["amount_eur_bce"]
+    data["interests_total_eur_bce"] = round(total_eur_bce, 2)
+
 
 # ─── CSV Parser ─────────────────────────────────────────────────────────────
 
@@ -190,6 +215,9 @@ def parse_ibkr_csv(file) -> dict:
         "commissions": [],
         "forex_trades": [],
         "total_pl": None,
+        "instrument_info": {},
+        "interests": [],
+        "interests_total_eur": 0.0,
     }
 
     for line in lines:
@@ -322,6 +350,30 @@ def parse_ibkr_csv(file) -> dict:
         elif section == "P/L totale per il periodo del rendiconto":
             if len(row) >= 13:
                 data["total_pl"] = _safe_float(row[12])
+
+        # Instrument Info (ISIN)
+        elif section == "Informazioni sullo strumento finanziario" and discriminator == "Data":
+            atype = row[2].strip() if len(row) > 2 else ""
+            symbol = row[3].strip() if len(row) > 3 else ""
+            if atype == "Opzioni su indici e su azioni" or not symbol:
+                pass  # no ISIN for options
+            elif len(row) >= 7:
+                isin = row[5].strip()
+                if isin and len(isin) >= 10:
+                    data["instrument_info"][symbol] = isin
+
+        # Interests
+        elif section == "Interessi" and discriminator == "Data":
+            currency = row[2].strip() if len(row) > 2 else ""
+            if currency == "Totale in EUR":
+                data["interests_total_eur"] = _safe_float(row[4]) if len(row) > 4 else 0.0
+            elif currency and currency != "Totale":
+                data["interests"].append({
+                    "currency": currency,
+                    "date": row[3].strip() if len(row) > 3 else "",
+                    "description": row[4].strip() if len(row) > 4 else "",
+                    "amount": _safe_float(row[5]) if len(row) > 5 else 0,
+                })
 
     return data
 
@@ -479,6 +531,12 @@ if uploaded_file:
     with st.sidebar:
         with st.spinner("🌐 Fetching ECB USD/EUR exchange rates…"):
             enrich_trades_with_eur(data)
+    # ISIN enrichment
+    instr = data.get("instrument_info", {})
+    for t in data.get("trades", []):
+        t["isin"] = instr.get(t["symbol"], "")
+    for t in data.get("forex_trades", []):
+        t["isin"] = ""
     st.session_state.parsed_data = data
 
 # AI Model Selection
@@ -966,6 +1024,48 @@ with tab_fiscal:
                     )
                     st.markdown("")
 
+                # ── RM — Redditi di Capitale Fonte Estera ────────────────────
+                interests = data.get("interests", [])
+                interests_total_eur = data.get("interests_total_eur", 0.0)
+                interests_total_eur_bce = data.get("interests_total_eur_bce", 0.0)
+                st.markdown("---")
+                st.subheader("📊 Quadro RM — Redditi di Capitale Fonte Estera")
+                st.info(
+                    "Gli interessi/proventi da fonte estera vanno dichiarati in **Quadro RM, "
+                    "Sezione II-A, Rigo RM31** (art. 18 TUIR), soggetti a imposta sostitutiva 26%."
+                )
+                if interests_total_eur > 0:
+                    imposta_rm = max(interests_total_eur * 0.26, 0)
+                    st.markdown(f"""
+| Campo RM | Valore |
+|---|---|
+| Tipo provento | Interessi su titoli (prestito titoli / SYEP) |
+| Rigo | **RM31** |
+| **Totale interessi EUR** (broker) | **€ {interests_total_eur:,.2f}** |
+| ↳ Tasso BCE giornaliero | € {interests_total_eur_bce:,.2f} |
+| Imposta sostitutiva (26%) | **€ {imposta_rm:,.2f}** |
+| Codice tributo F24 | **1100** |
+""")
+                    with st.expander("📋 Dettaglio interessi per operazione"):
+                        int_df = pd.DataFrame(interests)
+                        if not int_df.empty:
+                            cols_display = ["Valuta", "Data", "Descrizione", "Importo"]
+                            cols_data = ["currency", "date", "description", "amount"]
+                            if "amount_eur_bce" in int_df.columns:
+                                cols_display.append("Importo EUR (BCE)")
+                                cols_data.append("amount_eur_bce")
+                            display = int_df[cols_data].copy()
+                            display.columns = cols_display
+                            st.dataframe(
+                                display.style.format(
+                                    {"Importo": "€{:,.6f}", "Importo EUR (BCE)": "€{:,.6f}"}
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                else:
+                    st.caption("Nessun interesse o dividendo registrato nel periodo.")
+
                 # ── RW Monitoring for Italy ──────────────────────────────────
                 st.markdown("---")
                 st.subheader("🌍 Monitoraggio RW — Investimenti Esteri")
@@ -975,25 +1075,37 @@ with tab_fiscal:
                 )
 
                 if not trades_eur_df.empty:
-                    total_proceeds = trades_eur_df["proceeds_eur"].sum()
-                    total_cost = trades_eur_df["cost_basis_eur"].sum()
-                    avg_value = max(total_proceeds, total_cost) * 0.5
+                    nav_initial = data.get("nav_change", {}).get("Valore iniziale", 0)
+                    nav_final = data.get("nav_change", {}).get("Valore finale", 0)
+                    if nav_initial > 0 or nav_final > 0:
+                        avg_value = (nav_initial + nav_final) / 2
+                    else:
+                        total_proceeds = trades_eur_df["proceeds_eur"].sum()
+                        total_cost = trades_eur_df["cost_basis_eur"].sum()
+                        avg_value = max(total_proceeds, total_cost) * 0.5
+
+                    st.markdown(f"""
+| Campo RW | Valore |
+|---|---|
+| **Patrimonio iniziale** (01/01) | € {nav_initial:,.2f} |
+| **Patrimonio finale** (31/12) | € {nav_final:,.2f} |
+| **Formula valore medio** | ({nav_initial:,.2f} + {nav_final:,.2f}) / 2 |
+| **Valore medio investimenti** | **€ {avg_value:,.2f}** |
+| Soglia monitoraggio | € 15.000 |
+""")
 
                     if avg_value > 15000:
                         ivafe = max(avg_value * 0.002, 0)
+                        st.warning("⚠️ Soglia monitoraggio **superata** — compilare Quadro RW.")
                         st.markdown(f"""
-| Campo RW | Valore |
-|---|---|
-| Valore medio investimenti esteri | € {avg_value:,.2f} |
-| Soglia monitoraggio (€ 15.000) | ✅ Superata |
 | IVAFE dovuta (0,20%) | **€ {ivafe:,.2f}** |
 | Rigo RW | **RW1 — RW4** |
 | Sezione | I-A (Patrimoni finanziari) |
 """)
                     else:
                         st.success(
-                            f"✅ Valore medio € {avg_value:,.2f} — sotto la soglia di € 15.000. "
-                            "Monitoraggio RW non dovuto."
+                            f"✅ Soglia monitoraggio **non superata**. "
+                            "Obbligo dichiarativo RW non dovuto."
                         )
 
             else:
@@ -1269,6 +1381,19 @@ with tab_fiscal:
                     report_dict[f"{label} - {rigo_l} (Losses)"] = round(
                         cat_df[cat_df["realized_pl_eur"] < 0]["realized_pl_eur"].sum(), 2
                     )
+            # Add RM and RW data for Italy
+            if "Italia" in rpt_country:
+                report_dict["RM31 - Interessi fonte estera (EUR)"] = round(
+                    data.get("interests_total_eur", 0.0), 2
+                )
+                report_dict["RM31 - Interessi importo BCE (EUR)"] = round(
+                    data.get("interests_total_eur_bce", 0.0), 2
+                )
+                nav_init = data.get("nav_change", {}).get("Valore iniziale", 0)
+                nav_fin = data.get("nav_change", {}).get("Valore finale", 0)
+                report_dict["RW - Patrimonio iniziale (EUR)"] = round(nav_init, 2)
+                report_dict["RW - Patrimonio finale (EUR)"] = round(nav_fin, 2)
+                report_dict["RW - Valore medio (EUR)"] = round((nav_init + nav_fin) / 2, 2)
     except (NameError, AttributeError):
         pass
 
