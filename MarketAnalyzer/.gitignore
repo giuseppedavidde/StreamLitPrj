@@ -1,0 +1,48 @@
+# ── Python ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual Environment ────────────────────
+.venv/
+venv/
+env/
+
+# ── Cache (generato da cache_manager.py) ───
+.cache/
+
+# ── Report PDF generati ─────────────────────
+reports/
+!reports/.gitkeep
+
+# ── Logs & Temp ────────────────────────────
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# ── Secrets ─────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# ── IDE & OS ───────────────────────────────
+.idea/
+.vscode/
+*.sublime-*
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Jupyter (no Notebook checkpoints) ──────
+.ipynb_checkpoints/
+
+# ── OS generated ───────────────────────────
+ehthumbs.db
+*.stackdump
