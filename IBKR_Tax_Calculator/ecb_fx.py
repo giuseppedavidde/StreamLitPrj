@@ -1,19 +1,26 @@
 """
 ecb_fx.py
-----------
-Fetch official ECB daily reference exchange rates for any currency against EUR.
+-----------
+Fetch the official ECB daily USD/EUR reference exchange rate for a specific date.
 Uses the ECB Data Portal REST API:
   https://data.ecb.europa.eu/help/api/data
 
-The key series format is:  EXR / D.{CURRENCY}.EUR.SP00.A
+The key series is:  EXR / D.USD.EUR.SP00.A
   - D     = daily frequency
-  - CURRENCY = target currency (e.g. USD, GBP, JPY)
+  - USD   = US dollar
   - EUR   = Euro (denominator)
   - SP00  = foreign exchange reference rate
   - A     = average / standardised measure
 
-The API returns OBS_VALUE which is the number of CURRENCY per 1 EUR.
-We return this directly as "{CURRENCY} per EUR" (i.e. a rate > 1 means 1 EUR buys more than 1 unit of CURRENCY).
+The API returns OBS_VALUE which is the number of USD per 1 EUR.
+We return this directly as "USD per EUR" (i.e. a rate > 1 means 1 EUR buys more than 1 USD).
+
+Usage
+-----
+    from ecb_fx import fetch_usdeur_for_date
+    import datetime
+    rate, actual_date = fetch_usdeur_for_date(datetime.date(2025, 1, 2))
+    # rate = 1.0321, actual_date = datetime.date(2025, 1, 2)
 """
 
 import datetime
@@ -24,47 +31,34 @@ import requests
 
 
 _ECB_API_BASE = "https://data-api.ecb.europa.eu/service/data"
-_MAX_LOOKBACK_DAYS = 10
+_SERIES_KEY = "EXR/D.USD.EUR.SP00.A"
+_MAX_LOOKBACK_DAYS = 10  # how many days back to search if the exact date is a non-trading day
 
 
-def _build_series_key(currency: str) -> str:
-    """Build the ECB series key for a given currency against EUR."""
-    return f"EXR/D.{currency.upper()}.EUR.SP00.A"
-
-
-def fetch_ecb_rate_for_date(currency: str, target_date: datetime.date) -> tuple[float | None, datetime.date | None]:
-    """Fetch the ECB reference exchange rate for `currency` against EUR on `target_date`.
+def fetch_usdeur_for_date(target_date: datetime.date) -> tuple[float | None, datetime.date | None]:
+    """
+    Fetch the ECB reference USD/EUR exchange rate for `target_date`.
 
     Because markets are closed on weekends and some holidays, the ECB does not
     publish rates for every calendar day.  If no rate is found for `target_date`
     this function walks backwards up to _MAX_LOOKBACK_DAYS days to find the most
     recent available rate.
 
-    Parameters
-    ----------
-    currency : str
-        Three-letter currency code (e.g. "USD", "GBP", "JPY").
-    target_date : datetime.date
-        The date for which to fetch the rate.
-
     Returns
     -------
     (rate: float, actual_date: datetime.date)
-        rate        – number of `currency` per 1 EUR (e.g. 1.0321 for USD/EUR)
+        rate        – number of USD per 1 EUR  (e.g. 1.0321)
         actual_date – the date for which the rate was actually published
                       (may differ from target_date if it fell on a weekend/holiday)
 
     Returns (None, None) on network error or if no data is found.
     """
-    if currency.upper() == "EUR":
-        return 1.0, target_date
-
+    # We query a small window ending on target_date to handle the lookback
     start = target_date - datetime.timedelta(days=_MAX_LOOKBACK_DAYS)
     end = target_date
 
-    series_key = _build_series_key(currency)
     url = (
-        f"{_ECB_API_BASE}/{series_key}"
+        f"{_ECB_API_BASE}/{_SERIES_KEY}"
         f"?startPeriod={start.isoformat()}"
         f"&endPeriod={end.isoformat()}"
         f"&format=csvdata"
@@ -88,9 +82,11 @@ def fetch_ecb_rate_for_date(currency: str, target_date: datetime.date) -> tuple[
     if df.empty or "TIME_PERIOD" not in df.columns or "OBS_VALUE" not in df.columns:
         return None, None
 
+    # Parse dates and sort descending so the most recent is first
     df["TIME_PERIOD"] = pd.to_datetime(df["TIME_PERIOD"]).dt.date
     df = df.sort_values("TIME_PERIOD", ascending=False)
 
+    # Pick the most recent available rate on or before target_date
     eligible = df[df["TIME_PERIOD"] <= target_date]
     if eligible.empty:
         return None, None
@@ -101,19 +97,16 @@ def fetch_ecb_rate_for_date(currency: str, target_date: datetime.date) -> tuple[
     return rate, actual_date
 
 
-def fetch_ecb_rate_range(currency: str, start_date: datetime.date, end_date: datetime.date) -> dict[datetime.date, float]:
-    """Fetch all ECB reference rates for `currency` against EUR between start_date and end_date (inclusive).
-
-    Returns a dict mapping date -> rate (currency per EUR).
-    This is much more efficient than calling fetch_ecb_rate_for_date() for every date,
-    as it makes a single API call per currency.
+def fetch_usdeur_range(start_date: datetime.date, end_date: datetime.date) -> dict[datetime.date, float]:
     """
-    if currency.upper() == "EUR":
-        return {}
+    Fetch all ECB USD/EUR reference rates between start_date and end_date (inclusive).
 
-    series_key = _build_series_key(currency)
+    Returns a dict mapping date -> rate (USD per EUR).
+    This is much more efficient than calling fetch_usdeur_for_date() for every trade date,
+    as it makes a single API call.
+    """
     url = (
-        f"{_ECB_API_BASE}/{series_key}"
+        f"{_ECB_API_BASE}/{_SERIES_KEY}"
         f"?startPeriod={start_date.isoformat()}"
         f"&endPeriod={end_date.isoformat()}"
         f"&format=csvdata"
@@ -139,31 +132,3 @@ def fetch_ecb_rate_range(currency: str, start_date: datetime.date, end_date: dat
 
     df["TIME_PERIOD"] = pd.to_datetime(df["TIME_PERIOD"]).dt.date
     return dict(zip(df["TIME_PERIOD"], df["OBS_VALUE"].astype(float)))
-
-
-def fetch_ecb_rates_batch(currencies: list[str], start_date: datetime.date, end_date: datetime.date) -> dict[str, dict[datetime.date, float]]:
-    """Fetch ECB reference rates for multiple currencies in a single batch per currency.
-
-    Returns a dict: currency_code -> {date: rate} (currency per EUR).
-    This is more efficient than calling fetch_ecb_rate_range() in a loop when
-    multiple currencies need to be converted.
-    """
-    result: dict[str, dict[datetime.date, float]] = {}
-    for ccy in currencies:
-        upper = ccy.upper()
-        if upper == "EUR":
-            continue
-        result[upper] = fetch_ecb_rate_range(upper, start_date, end_date)
-    return result
-
-
-# ─── Deprecated backward-compatible wrappers ────────────────────────────────
-
-def fetch_usdeur_for_date(target_date: datetime.date) -> tuple[float | None, datetime.date | None]:
-    """Deprecated: use fetch_ecb_rate_for_date('USD', target_date) instead."""
-    return fetch_ecb_rate_for_date("USD", target_date)
-
-
-def fetch_usdeur_range(start_date: datetime.date, end_date: datetime.date) -> dict[datetime.date, float]:
-    """Deprecated: use fetch_ecb_rate_range('USD', start_date, end_date) instead."""
-    return fetch_ecb_rate_range("USD", start_date, end_date)
