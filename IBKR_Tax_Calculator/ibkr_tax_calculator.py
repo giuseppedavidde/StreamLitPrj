@@ -523,6 +523,10 @@ st.sidebar.radio(
 st.sidebar.markdown("---")
 
 uploaded_file = st.sidebar.file_uploader("Carica rendiconto IBKR (CSV)", type=["csv"])
+st.sidebar.caption(
+    "💡 **Mexem** → Performance e Resoconti → Rendiconti → "
+    "Rendiconto di Attività → Periodo **Annuale** → Scarica CSV"
+)
 
 if uploaded_file:
     data = parse_ibkr_csv(uploaded_file)

@@ -168,6 +168,296 @@ def compute_greeks_table(
     return results
 
 
+# ─── YFinance Option Helpers ───────────────────────────────────────────────
+# These functions are used as fallback when IBKR is not connected.
+# They mirror the data format of ibkr_connector methods.
+
+RISK_FREE_RATE = 0.045
+
+
+def safe_float_yf(val) -> float:
+    try:
+        v = float(val)
+        if math.isnan(v) or math.isinf(v):
+            return 0.0
+        return v
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_option_chain_yfinance(ticker: str) -> tuple[list[str], list[float]]:
+    """Fetch option expirations and strikes from Yahoo Finance.
+
+    Returns:
+        (sorted_expirations_yyyymmdd, sorted_strikes)
+    """
+    import yfinance as yf
+    yf_ticker = yf.Ticker(ticker)
+    expirations = yf_ticker.options
+    if not expirations:
+        return [], []
+    # Normalize to YYYYMMDD format (same as IBKR)
+    exps = sorted(e.replace("-", "") for e in expirations)
+    # Collect all strikes across all expirations
+    all_strikes: set[float] = set()
+    for exp in expirations[:5]:  # sample first 5 to avoid rate limits
+        try:
+            chain = yf_ticker.option_chain(exp)
+            for s in chain.calls["strike"]:
+                all_strikes.add(float(s))
+            for s in chain.puts["strike"]:
+                all_strikes.add(float(s))
+        except Exception:
+            pass
+    if not all_strikes:
+        return exps, []
+    strikes = sorted(all_strikes)
+    return exps, strikes
+
+
+def get_option_greeks_from_yfinance(
+    ticker: str,
+    expiry_str: str,
+    strikes: list[float],
+    underlying_price: float,
+    rate: float = 0.05,
+) -> list[dict]:
+    """Compute Greeks table from Yahoo Finance option chain IV.
+
+    Returns the same format as ibkr_connector.get_real_greeks_table():
+    [{"strike": s, "expiry": expiry_str, "dte": dte,
+      "call": {price, delta, gamma, theta, vega},
+      "put":  {price, delta, gamma, theta, vega}}, ...]
+    """
+    import yfinance as yf
+    dte = days_to_expiry(expiry_str.replace("-", ""))
+    if dte <= 0:
+        return []
+
+    yf_ticker = yf.Ticker(ticker)
+    exp_formatted = expiry_str[:4] + "-" + expiry_str[4:6] + "-" + expiry_str[6:8]
+    try:
+        chain = yf_ticker.option_chain(exp_formatted)
+    except Exception:
+        return []
+
+    calls = chain.calls
+    puts = chain.puts
+    results = []
+
+    for strike in strikes:
+        # Find closest match in yfinance chain
+        c_match = calls.iloc[(calls["strike"] - strike).abs().idxmin()] if not calls.empty else None
+        p_match = puts.iloc[(puts["strike"] - strike).abs().idxmin()] if not puts.empty else None
+
+        c_iv = safe_float_yf(c_match["impliedVolatility"]) if c_match is not None else 0.3
+        p_iv = safe_float_yf(p_match["impliedVolatility"]) if p_match is not None else 0.3
+        if c_iv <= 0:
+            c_iv = 0.3
+        if p_iv <= 0:
+            p_iv = 0.3
+
+        c_greeks = black_scholes_greeks(underlying_price, strike, dte, rate, c_iv, "C")
+        p_greeks = black_scholes_greeks(underlying_price, strike, dte, rate, p_iv, "P")
+
+        results.append({
+            "strike": strike,
+            "expiry": expiry_str,
+            "dte": dte,
+            "call": c_greeks,
+            "put": p_greeks,
+        })
+
+    return results
+
+
+def get_iv_rank_yfinance(ticker: str, expiry_str: str) -> tuple[float, float]:
+    """Fetch average IV and IV rank from Yahoo Finance option chain.
+
+    Returns:
+        (avg_iv as decimal, iv_rank as 0-100)
+    """
+    import yfinance as yf
+    yf_ticker = yf.Ticker(ticker)
+    exp_formatted = expiry_str[:4] + "-" + expiry_str[4:6] + "-" + expiry_str[6:8]
+    try:
+        chain = yf_ticker.option_chain(exp_formatted)
+    except Exception:
+        return 0.3, 50.0
+
+    ivs = []
+    for _, row in chain.calls.iterrows():
+        iv = safe_float_yf(row.get("impliedVolatility"))
+        if iv > 0:
+            ivs.append(iv)
+    for _, row in chain.puts.iterrows():
+        iv = safe_float_yf(row.get("impliedVolatility"))
+        if iv > 0:
+            ivs.append(iv)
+
+    if len(ivs) < 5:
+        return 0.3, 50.0
+
+    avg_iv = float(np.mean(ivs))
+    iv_low = float(np.min(ivs))
+    iv_high = float(np.max(ivs))
+    if iv_high - iv_low < 0.001:
+        return avg_iv, 50.0
+    iv_rank = (avg_iv - iv_low) / (iv_high - iv_low) * 100
+    return avg_iv, iv_rank
+
+
+def compute_volume_profile_yfinance(ticker: str, n_bins: int = 60) -> dict | None:
+    """Compute Volume Profile (1 year) from Yahoo Finance historical data.
+
+    Returns dict with: vpoc, vah, val, hvn_zones, lvn_zones
+    or None if insufficient data.
+    """
+    import yfinance as yf
+    yf_ticker = yf.Ticker(ticker)
+    hist = yf_ticker.history(period="1y")
+    if hist.empty or len(hist) < 20:
+        return None
+
+    prices = hist["Close"].values
+    volumes = hist["Volume"].values
+    lo, hi = float(np.min(prices)), float(np.max(prices))
+    if hi - lo < 0.01:
+        return None
+
+    bins = np.linspace(lo, hi, n_bins + 1)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    bin_idx = np.digitize(prices, bins) - 1
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+    vol_per_bin = np.zeros(n_bins)
+    for i, idx in enumerate(bin_idx):
+        vol_per_bin[idx] += volumes[i]
+
+    total_vol = vol_per_bin.sum()
+    if total_vol == 0:
+        return None
+
+    vpoc_idx = int(np.argmax(vol_per_bin))
+    vpoc = float(bin_centers[vpoc_idx])
+
+    sorted_idx = np.argsort(vol_per_bin)[::-1]
+    cum_vol = 0.0
+    va_bins = []
+    for idx in sorted_idx:
+        va_bins.append(idx)
+        cum_vol += vol_per_bin[idx]
+        if cum_vol >= total_vol * 0.70:
+            break
+
+    vah = float(bin_centers[max(va_bins)])
+    val = float(bin_centers[min(va_bins)])
+
+    avg_vol_per_bin = total_vol / n_bins
+
+    hvn_indices = [i for i in range(n_bins) if vol_per_bin[i] > avg_vol_per_bin * 2]
+    hvn_zones = []
+    if hvn_indices:
+        hvn_indices.sort()
+        start = hvn_indices[0]
+        for i in range(1, len(hvn_indices)):
+            if hvn_indices[i] - hvn_indices[i - 1] > 2:
+                hvn_zones.append((float(bin_centers[start]), float(bin_centers[hvn_indices[i - 1]])))
+                start = hvn_indices[i]
+        hvn_zones.append((float(bin_centers[start]), float(bin_centers[hvn_indices[-1]])))
+
+    lvn_indices = [i for i in range(n_bins) if vol_per_bin[i] < avg_vol_per_bin * 0.3]
+    lvn_zones = []
+    if lvn_indices:
+        lvn_indices.sort()
+        start = lvn_indices[0]
+        for i in range(1, len(lvn_indices)):
+            if lvn_indices[i] - lvn_indices[i - 1] > 2:
+                lvn_zones.append((float(bin_centers[start]), float(bin_centers[lvn_indices[i - 1]])))
+                start = lvn_indices[i]
+        lvn_zones.append((float(bin_centers[start]), float(bin_centers[lvn_indices[-1]])))
+
+    return {
+        "vpoc": round(vpoc, 2),
+        "vah": round(vah, 2),
+        "val": round(val, 2),
+        "hvn_zones": [(round(a, 2), round(b, 2)) for a, b in hvn_zones],
+        "lvn_zones": [(round(a, 2), round(b, 2)) for a, b in lvn_zones],
+    }
+
+
+def compute_sentiment_yfinance(ticker: str, expiry_str: str, iv_rank: float | None) -> dict:
+    """Compute Put/Call sentiment from Yahoo Finance option chain.
+
+    Returns dict with: pc_oi_ratio, pc_vol_ratio, oi_signal, vol_signal,
+    iv_signal, contrarian_signal.
+    """
+    import yfinance as yf
+    yf_ticker = yf.Ticker(ticker)
+    exp_formatted = expiry_str[:4] + "-" + expiry_str[4:6] + "-" + expiry_str[6:8]
+    try:
+        chain = yf_ticker.option_chain(exp_formatted)
+    except Exception:
+        return {
+            "pc_oi_ratio": None,
+            "pc_vol_ratio": None,
+            "oi_signal": "neutral",
+            "vol_signal": "neutral",
+            "iv_signal": "neutral",
+            "contrarian_signal": None,
+        }
+
+    calls = chain.calls
+    puts = chain.puts
+
+    call_oi = int(calls["openInterest"].sum()) if not calls.empty else 0
+    put_oi = int(puts["openInterest"].sum()) if not puts.empty else 0
+    call_vol = int(calls["volume"].sum()) if not calls.empty else 0
+    put_vol = int(puts["volume"].sum()) if not puts.empty else 0
+
+    pc_oi = put_oi / call_oi if call_oi > 0 else None
+    pc_vol = put_vol / call_vol if call_vol > 0 else None
+
+    oi_signal = "neutral"
+    if pc_oi is not None:
+        if pc_oi < 0.5:
+            oi_signal = "bullish (many calls open)"
+        elif pc_oi > 1.2:
+            oi_signal = "bearish (many puts open)"
+
+    vol_signal = "neutral"
+    if pc_vol is not None:
+        if pc_vol < 0.6:
+            vol_signal = "bullish (more calls trading)"
+        elif pc_vol > 1.3:
+            vol_signal = "bearish (more puts trading)"
+
+    iv_signal = "neutral"
+    if iv_rank is not None:
+        if iv_rank > 80:
+            iv_signal = f"IV high ({iv_rank:.0f}% rank) → options expensive, good to sell premium"
+        elif iv_rank < 20:
+            iv_signal = f"IV low ({iv_rank:.0f}% rank) → options cheap, good to buy premium"
+        else:
+            iv_signal = f"IV moderate ({iv_rank:.0f}% rank) → no extreme"
+
+    contrarian_signal = None
+    if pc_oi is not None and pc_vol is not None:
+        if oi_signal.startswith("bullish") and vol_signal.startswith("bearish"):
+            contrarian_signal = "Possible short-term reversal: OI bullish but volume bearish"
+        elif oi_signal.startswith("bearish") and vol_signal.startswith("bullish"):
+            contrarian_signal = "Possible short-term reversal: OI bearish but volume bullish"
+
+    return {
+        "pc_oi_ratio": round(pc_oi, 2) if pc_oi is not None else None,
+        "pc_vol_ratio": round(pc_vol, 2) if pc_vol is not None else None,
+        "oi_signal": oi_signal,
+        "vol_signal": vol_signal,
+        "iv_signal": iv_signal,
+        "contrarian_signal": contrarian_signal,
+    }
+
+
 def vectorized_black_scholes(
     S_array: np.ndarray,
     K: float,

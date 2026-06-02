@@ -17,11 +17,13 @@ try:
     from agents.ai_provider import AIProvider
     from agents.cloud_manager import CloudManager
     from agents.bank_importer import BankImporter
+    from agents.opencode_agent import OpencodeAgent
 except ImportError as e:
     st.error(f"Modulo 'agents' non trovato o errore importazione: {e}")
     AIProvider = None
     CloudManager = None
     BankImporter = None
+    OpencodeAgent = None
 
 # Configurazione Pagina
 st.set_page_config(page_title="Budget Manager", page_icon="💰", layout="wide")
@@ -177,6 +179,17 @@ if not df.empty:
                         )
                     except Exception as e:
                         st.error(f"Errore Init AI: {e}")
+
+        # --- 1c. OPENCODE AGENT (Sidebar) ---
+        st.sidebar.divider()
+        if OpencodeAgent:
+            opencode_cfg = OpencodeAgent.render_streamlit_sidebar()
+            if opencode_cfg:
+                st.session_state["opencode_agent"] = OpencodeAgent(
+                    opencode_cfg
+                )
+            else:
+                st.session_state.pop("opencode_agent", None)
 
         # --- 1b. CLOUD DATA SYNC (Sidebar) ---
         render_cloud_sync_ui(DATA_FILE, is_sidebar=True)
@@ -694,19 +707,31 @@ if not df.empty:
             )
 
             if uploaded_bank_file is not None and BankImporter:
-                # Check AI Provider
-                if (
-                    "ai_provider" not in st.session_state
-                    or st.session_state["ai_provider"] is None
-                ):
+                # Check AI Provider or OpenCode Agent
+                has_ai = (
+                    "ai_provider" in st.session_state
+                    and st.session_state["ai_provider"] is not None
+                )
+                has_oc = (
+                    "opencode_agent" in st.session_state
+                    and st.session_state["opencode_agent"] is not None
+                )
+                if not has_ai and not has_oc:
                     st.error(
-                        "⚠️ AI non configurata! Configurala nella sidebar 'Assistant AI' o Dashboard."
+                        "⚠️ AI/OpenCode non configurata! Configura AI nella sidebar o attiva OpenCode Agent."
                     )
                 else:
                     if st.button("🚀 Analizza e Categorizza"):
                         progress_bar = st.progress(0, text="Avvio analisi...")
                         try:
-                            importer = BankImporter(st.session_state["ai_provider"])
+                            if has_oc:
+                                importer = BankImporter(
+                                    opencode_agent=st.session_state["opencode_agent"]
+                                )
+                            else:
+                                importer = BankImporter(
+                                    ai_provider=st.session_state["ai_provider"]
+                                )
                             target_cats = income_cols + expense_cols
 
                             # Callback wrapper
@@ -990,12 +1015,17 @@ if not df.empty:
         st.caption("Chiedi al tuo assistente personale informazioni sul tuo budget.")
 
         # Check se il provider è configurato
-        if (
-            "ai_provider" not in st.session_state
-            or st.session_state["ai_provider"] is None
-        ):
+        has_ai = (
+            "ai_provider" in st.session_state
+            and st.session_state["ai_provider"] is not None
+        )
+        has_oc = (
+            "opencode_agent" in st.session_state
+            and st.session_state["opencode_agent"] is not None
+        )
+        if not has_ai and not has_oc:
             st.warning(
-                "⚠️ Configura prima l'AI nella sidebar (scegli Provider e Modello e clicca Applica)."
+                "⚠️ Configura l'AI nella sidebar oppure attiva OpenCode Agent per parlare con l'assistente."
             )
         else:
             # 1. Inizializza cronologia chat
@@ -1082,15 +1112,20 @@ if not df.empty:
                                     {"mime_type": mime_type, "data": bytes_data}
                                 )
 
-                        if len(final_prompt) == 1:
-                            final_prompt = final_prompt[0]
-
-                        # Streaming
-                        stream_gen = (
-                            st.session_state["ai_provider"]
-                            .get_model()
-                            .generate_stream(final_prompt)
-                        )
+                        # Streaming - dispatch to OpenCode or AIProvider
+                        if has_oc and not uploaded_files:
+                            # OpenCode: text-only chat
+                            stream_gen = st.session_state["opencode_agent"].stream_chat(
+                                final_prompt_text, "budget_assistant"
+                            )
+                        else:
+                            if len(final_prompt) == 1:
+                                final_prompt = final_prompt[0]
+                            stream_gen = (
+                                st.session_state["ai_provider"]
+                                .get_model()
+                                .generate_stream(final_prompt)
+                            )
                         response_text = st.write_stream(stream_gen)
 
                         st.session_state.messages.append(

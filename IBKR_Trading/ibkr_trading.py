@@ -13,6 +13,11 @@ from option_utils import (
     historical_volatility,
     vectorized_black_scholes,
     days_to_expiry,
+    get_option_chain_yfinance,
+    get_option_greeks_from_yfinance,
+    get_iv_rank_yfinance,
+    compute_volume_profile_yfinance,
+    compute_sentiment_yfinance,
 )
 
 # Load .env (GOOGLE_API_KEY etc.) before importing agents
@@ -474,7 +479,7 @@ _SKILLS_MAP = {
 _SEC_DEFAULT = "stock" if sec_type == "STK" else "options"
 _AVAILABLE_SKILLS = list(_SKILLS_MAP[_SEC_DEFAULT].keys()) if _SEC_DEFAULT in _SKILLS_MAP else []
 _prev_skills = st.session_state.get("selected_skills", None)
-default_skills = _prev_skills if _prev_skills else list(_AVAILABLE_SKILLS)
+default_skills = [s for s in (_prev_skills or []) if s in _AVAILABLE_SKILLS] or list(_AVAILABLE_SKILLS)
 
 with st.sidebar.expander("📚 Skills Debate", expanded=True):
     selected_skills = st.multiselect(
@@ -991,11 +996,9 @@ strike = None
 right = None
 
 if sec_type == "OPT":
-    if not is_connected:
-        st.warning("⚠️ Connect to IBKR to load Option Chain data. Options are not available via YFinance.")
-    else:
-        opt_cache_key = f"opt_{ticker}"
-        if st.session_state.get("opt_cache_key") != opt_cache_key:
+    opt_cache_key = f"opt_{ticker}"
+    if st.session_state.get("opt_cache_key") != opt_cache_key:
+        if is_connected:
             progress = st.progress(0, text=f"Loading option chain for {ticker}...")
             step = {"n": 0, "total": 4}
 
@@ -1024,6 +1027,26 @@ if sec_type == "OPT":
                 if st.button("🔄 Retry"):
                     st.session_state.pop("opt_cache_key", None)
                     st.rerun()
+        else:
+            with st.spinner(f"📡 Fetching {ticker} options via Yahoo Finance..."):
+                try:
+                    exps, strikes = get_option_chain_yfinance(ticker)
+                except Exception as e:
+                    print(f"[ERROR] YFinance chain: {type(e).__name__}: {e}")
+                    traceback.print_exc()
+                    exps, strikes = [], []
+                st.session_state["opt_exps"] = exps
+                st.session_state["opt_strikes"] = strikes
+                st.session_state["opt_cache_key"] = opt_cache_key
+                st.session_state["opt_source"] = "YFinance"
+                if exps:
+                    st.info(
+                        f"📡 Opzioni via Yahoo Finance — {len(exps)} expiration, "
+                        f"{len(strikes)} strike{'s' if len(strikes) != 1 else ''} caricati. "
+                        "Connettiti a IBKR per dati in tempo reale."
+                    )
+                else:
+                    st.warning(f"❌ Yahoo Finance: nessuna opzione disponibile per {ticker}.")
 
         # Show option selectors if data is available
         if (
@@ -1101,6 +1124,7 @@ if sec_type == "OPT":
                 if suggest_clicked:
                     provider_type = st.session_state.get("ai_provider", "gemini")
                     model_name = st.session_state.get("ai_model_name")
+                    opt_source = st.session_state.get("opt_source", "IBKR")
 
                     with st.spinner(
                         "📊 Fetching data, computing Black-Scholes Greeks, querying AI..."
@@ -1121,144 +1145,142 @@ if sec_type == "OPT":
                                 und_analysis = detect_patterns(und_df)
                                 price = und_analysis.get("current_price", 0)
 
-                                # Identify target expiration for precise IV pulling and exact valid strikes
+                                # Identify target expiration
                                 best_exp = limited_exps[0] if limited_exps else None
 
-                                # Fetch actual strikes for the specific expiration to avoid Hallucinated LEAP strikes
+                                # Determine strikes
                                 valid_source_strikes = available_strikes
-                                if best_exp:
-                                    st.write(
-                                        f"🔍 Validating specific available strikes for {best_exp}..."
-                                    )
+                                if best_exp and is_connected:
                                     specific_strikes = st.session_state.connector.get_strikes_for_expiration(
                                         ticker, best_exp
                                     )
                                     if specific_strikes:
                                         valid_source_strikes = specific_strikes
 
-                                # Filter strikes near ATM for Greeks computation
+                                # Filter strikes near ATM
                                 atm_range = price * 0.10
                                 nearby_strikes = sorted(
-                                    [
-                                        s
-                                        for s in valid_source_strikes
-                                        if abs(s - price) <= atm_range
-                                    ]
+                                    [s for s in valid_source_strikes if abs(s - price) <= atm_range]
                                 )
                                 if len(nearby_strikes) < 4:
-                                    # Fallback: take closest 10 strikes instead of just the first 20 globally
                                     nearby_strikes = sorted(
-                                        valid_source_strikes,
-                                        key=lambda s: abs(s - price),
+                                        valid_source_strikes, key=lambda s: abs(s - price)
                                     )[:10]
                                     nearby_strikes = sorted(nearby_strikes)
 
                                 closest_strike = (
                                     min(nearby_strikes, key=lambda s: abs(s - price))
-                                    if nearby_strikes
-                                    else None
+                                    if nearby_strikes else None
                                 )
 
-                                # Fetch the global 30-day Implied Volatility (IV) directly from IBKR for the underlying stock
-                                iv_data = (
-                                    st.session_state.connector.get_implied_volatility(
+                                # ── IV + Greeks via IBKR or YFinance ────────────────
+                                greeks_table = []
+                                last_exp_iv = 0.30
+                                last_exp_iv_data = None
+                                iv_rank = None
+
+                                if is_connected:
+                                    # IBKR path: stock-level IV
+                                    iv_data = st.session_state.connector.get_implied_volatility(
                                         ticker, exchange="SMART", currency="USD"
                                     )
-                                )
+                                    if isinstance(iv_data, dict):
+                                        iv = iv_data.get("avg") if iv_data else None
+                                        raw_iv = iv_data.get("iv") if iv_data else None
+                                        raw_hv = iv_data.get("hv") if iv_data else None
+                                        iv_data_raw = iv_data
+                                    else:
+                                        iv = iv_data
+                                        iv_data_raw = {"avg": iv, "iv": iv, "hv": None} if iv is not None else None
+                                        raw_iv = iv
+                                        raw_hv = None
+                                    if iv is None or iv <= 0:
+                                        iv = und_analysis.get("hist_volatility", historical_volatility(und_df))
+                                    last_exp_iv = iv
+                                    last_exp_iv_data = iv_data_raw
 
-                                # Handle session_state caching the old IBKRConnector which returned a float
-                                if isinstance(iv_data, dict):
-                                    iv = iv_data.get("avg") if iv_data else None
-                                    raw_iv = iv_data.get("iv") if iv_data else None
-                                    raw_hv = iv_data.get("hv") if iv_data else None
+                                    for exp in limited_exps:
+                                        exp_iv_data = st.session_state.connector.get_implied_volatility(
+                                            ticker, exchange="SMART", currency="USD",
+                                            expiry=exp, strike=closest_strike,
+                                        )
+                                        exp_iv = iv
+                                        if exp_iv_data and isinstance(exp_iv_data, dict):
+                                            exp_iv_val = exp_iv_data.get("iv") or exp_iv_data.get("avg")
+                                            if exp_iv_val and exp_iv_val > 0:
+                                                exp_iv = exp_iv_val
+                                                last_exp_iv = exp_iv
+                                                last_exp_iv_data = exp_iv_data
+                                        exp_greeks = st.session_state.connector.get_real_greeks_table(
+                                            ticker=ticker, expiry_str=exp,
+                                            strikes=nearby_strikes,
+                                            underlying_price=price, hist_vol=exp_iv,
+                                        )
+                                        greeks_table.extend(exp_greeks)
                                 else:
-                                    iv = iv_data
-                                    iv_data = (
-                                        {"avg": iv, "iv": iv, "hv": None}
-                                        if iv is not None
-                                        else None
-                                    )
-                                    raw_iv = iv
-                                    raw_hv = None
+                                    # YFinance path
+                                    if best_exp:
+                                        avg_iv, iv_rank = get_iv_rank_yfinance(ticker, best_exp)
+                                        last_exp_iv = avg_iv
+                                        last_exp_iv_data = {"avg": avg_iv, "iv": avg_iv, "hv": None, "source": "YFinance"}
+                                        exp_greeks = get_option_greeks_from_yfinance(
+                                            ticker, best_exp, nearby_strikes, price
+                                        )
+                                        if exp_greeks:
+                                            greeks_table.extend(exp_greeks)
 
-                                # Fallback to local historical volatility if IV is unavailable
-                                if iv is None or iv <= 0:
-                                    iv = und_analysis.get(
-                                        "hist_volatility",
-                                        historical_volatility(und_df),
-                                    )
-                                    print(f"⚠️ Falling back to local HV: {iv}")
-                                else:
-                                    print(f"📊 Native IBKR IV fetched: {iv}")
+                                # ── Volume Profile + Sentiment (YFinance, always) ──
+                                volprof = compute_volume_profile_yfinance(ticker)
+                                sent = None
+                                if best_exp:
+                                    sent = compute_sentiment_yfinance(ticker, best_exp, iv_rank)
+                                st.session_state["opt_volprof"] = volprof
+                                st.session_state["opt_sentiment"] = sent
 
-                                # Compute Black-Scholes Greeks for all strike x expiry combos
-                                greeks_table = []
-                                last_exp_iv = iv
-                                last_exp_iv_data = iv_data
+                                # ── Build AI context ────────────────────────────────
+                                agent = TraderAgent(provider_type=provider_type, model_name=model_name)
 
-                                for exp in limited_exps:
-                                    # Fetch specific IV for the closest ATM strike of this expiration
-                                    exp_iv_data = st.session_state.connector.get_implied_volatility(
-                                        ticker,
-                                        exchange="SMART",
-                                        currency="USD",
-                                        expiry=exp,
-                                        strike=closest_strike,
-                                    )
-
-                                    exp_iv = iv  # Fallback to stock 30-day IV
-                                    if exp_iv_data and isinstance(exp_iv_data, dict):
-                                        # Prefer the raw option IV (106) if available, else average
-                                        exp_iv_val = exp_iv_data.get(
-                                            "iv"
-                                        ) or exp_iv_data.get("avg")
-                                        if exp_iv_val and exp_iv_val > 0:
-                                            exp_iv = exp_iv_val
-                                            last_exp_iv = exp_iv
-                                            last_exp_iv_data = exp_iv_data
-
-                                    exp_greeks = st.session_state.connector.get_real_greeks_table(
-                                        ticker=ticker,
-                                        expiry_str=exp,
-                                        strikes=nearby_strikes,
-                                        underlying_price=price,
-                                        hist_vol=exp_iv,
-                                    )
-                                    greeks_table.extend(exp_greeks)
-
-                                agent = TraderAgent(
-                                    provider_type=provider_type,
-                                    model_name=model_name,
-                                )
-                                
-                                # Fetch holders & financials for OPT (always fresh)
                                 m_holders = get_holders_info(ticker)
                                 m_fin = get_financial_info(ticker)
                                 st.session_state.market_holders = m_holders
                                 st.session_state.market_financials = m_fin
-                                
-                                # Costruisci il fundamentals_context da passare al TraderAgent
-                                f_ctx = "Nessun dato fondamentale/societario disponibile."
-                                if m_holders or m_fin:
-                                    f_ctx = "FUNDAMENTALS & HOLDERS:\n"
-                                    if m_fin:
-                                        f_ctx += "Dati Finanziari: " + ", ".join(f"{k}={v}" for k,v in m_fin.items()) + "\n"
-                                    if m_holders.get("institutional_holders"):
-                                        f_ctx += "Top Istituzioni: " + ", ".join(h['Holder'] for h in m_holders["institutional_holders"]) + "\n"
-                                    if m_holders.get("etf_mutualfund_holders"):
-                                        f_ctx += "Top ETF/Fondi: " + ", ".join(h['Holder'] for h in m_holders["etf_mutualfund_holders"]) + "\n"
-                                        
+
+                                f_ctx_lines = []
+                                if m_fin:
+                                    f_ctx_lines.append("FUNDAMENTALS: " + ", ".join(f"{k}={v}" for k, v in m_fin.items()))
+                                if m_holders.get("institutional_holders"):
+                                    f_ctx_lines.append("TOP INSTITUTIONS: " + ", ".join(h['Holder'] for h in m_holders["institutional_holders"][:5]))
+                                if m_holders.get("etf_mutualfund_holders"):
+                                    f_ctx_lines.append("TOP ETF/FUNDS: " + ", ".join(h['Holder'] for h in m_holders["etf_mutualfund_holders"][:5]))
+                                if volprof:
+                                    f_ctx_lines.append(
+                                        f"VOLUME PROFILE (1yr): VPOC=${volprof['vpoc']}, "
+                                        f"VAH=${volprof['vah']}, VAL=${volprof['val']}"
+                                    )
+                                    if volprof["hvn_zones"]:
+                                        f_ctx_lines.append(f"  HVN zones: {volprof['hvn_zones'][:3]}")
+                                    if volprof["lvn_zones"]:
+                                        f_ctx_lines.append(f"  LVN gaps: {volprof['lvn_zones'][:3]}")
+                                if sent:
+                                    f_ctx_lines.append(f"SENTIMENT: P/C OI={sent['pc_oi_ratio']} ({sent['oi_signal']}), "
+                                                       f"P/C Vol={sent['pc_vol_ratio']} ({sent['vol_signal']})")
+                                    if sent.get("contrarian_signal"):
+                                        f_ctx_lines.append(f"  CONTRARIAN: {sent['contrarian_signal']}")
+                                    f_ctx_lines.append(f"  IV: {sent['iv_signal']}")
+
+                                f_ctx = "\n".join(f_ctx_lines) if f_ctx_lines else "Nessun dato fondamentale disponibile."
+
                                 strategies, metrics_matrix = agent.suggest_option_strategy(
                                     ticker=ticker,
                                     analysis=und_analysis,
-                                    expirations=limited_exps,  # CRITICAL: Pass only the user-selected date
-                                    strikes=nearby_strikes,  # CRITICAL: Pass only the valid strikes for that date
+                                    expirations=limited_exps,
+                                    strikes=nearby_strikes,
                                     underlying_price=price,
                                     time_horizon=time_horizon,
                                     greeks_table=greeks_table,
-                                    iv=last_exp_iv,  # Give AI the latest Expiration IV we gathered
+                                    iv=last_exp_iv,
                                     geopolitics_context=st.session_state.get("geo_events_input"),
-                                    fundamentals_context=f_ctx
+                                    fundamentals_context=f_ctx,
                                 )
                                 for s in strategies:
                                     s["iv_used"] = last_exp_iv
@@ -1348,6 +1370,9 @@ if sec_type == "OPT":
                             iv_used = strat.get("iv_used", 0.30)
                             strat_iv_data = strat.get("iv_data")
 
+                            iv_source = ""
+                            if strat_iv_data:
+                                iv_source = strat_iv_data.get("source", "IBKR")
                             if (
                                 strat_iv_data
                                 and strat_iv_data.get("iv") is not None
@@ -1356,12 +1381,13 @@ if sec_type == "OPT":
                                 iv_str = f"Avg: {strat_iv_data.get('avg')*100:.1f}% (IV: {strat_iv_data.get('iv')*100:.1f}% | HV: {strat_iv_data.get('hv')*100:.1f}%)"
                             else:
                                 iv_str = f"{iv_used*100:.1f}%"
+                            iv_source_str = f"📡 *{iv_source}*" if iv_source == "YFinance" else f"📡 **IBKR**"
 
                             st.markdown(
                                 f"\n💰 **Max Profit:** {strat.get('max_profit', 'N/A')} · "
                                 f"💸 **Max Loss:** {strat.get('max_loss', 'N/A')} · "
                                 f"⚖️ **Breakeven:** {strat.get('breakeven', 'N/A')} · "
-                                f"📊 **IV Assunta (IBKR):** {iv_str}"
+                                f"📊 **IV Assunta:** {iv_str} {iv_source_str}"
                             )
 
                             # AI Rationale (should cite real indicator values)
@@ -1467,6 +1493,36 @@ if sec_type == "OPT":
                                     "market_df", None
                                 )  # Clear single option view
 
+                    # ── Volume Profile & Sentiment (from YFinance) ──────────────
+                    volprof = st.session_state.get("opt_volprof")
+                    sent = st.session_state.get("opt_sentiment")
+                    if volprof or sent:
+                        with st.expander("📊 Volume Profile & Sentiment (YFinance)", expanded=False):
+                            if volprof:
+                                st.markdown(f"""
+**📈 Volume Profile (1 anno)**
+| Indicatore | Valore |
+|---|---|
+| **VPOC** | **${volprof['vpoc']:.2f}** |
+| VAH (Value Area High) | ${volprof['vah']:.2f} |
+| VAL (Value Area Low) | ${volprof['val']:.2f} |
+| Prezzo vs VA | {'**Sopra** VAH (esteso)' if price > volprof['vah'] else '**Sotto** VAL (esteso)' if price < volprof['val'] else 'Dentro Value Area'} |
+""")
+                                if volprof["hvn_zones"]:
+                                    hvns = ",  ".join(f"${a:.2f}-${b:.2f}" for a, b in volprof["hvn_zones"][:3])
+                                    st.caption(f"HVN zones: {hvns}")
+                                if volprof["lvn_zones"]:
+                                    lvns = ",  ".join(f"${a:.2f}-${b:.2f}" for a, b in volprof["lvn_zones"][:3])
+                                    st.caption(f"LVN gaps: {lvns}")
+                            if sent:
+                                st.markdown("**🐻 Sentiment (Put/Call)**")
+                                if sent["pc_oi_ratio"] is not None:
+                                    st.caption(f"P/C OI Ratio: {sent['pc_oi_ratio']:.2f} — *{sent['oi_signal']}*")
+                                if sent["pc_vol_ratio"] is not None:
+                                    st.caption(f"P/C Vol Ratio: {sent['pc_vol_ratio']:.2f} — *{sent['vol_signal']}*")
+                                st.caption(f"IV: {sent['iv_signal']}")
+                                if sent.get("contrarian_signal"):
+                                    st.warning(f"⚠️ {sent['contrarian_signal']}")
                     st.markdown("---")
 
                     # ─── Options Strategies General Chat ────────────────────────
