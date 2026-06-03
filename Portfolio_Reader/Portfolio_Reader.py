@@ -50,7 +50,7 @@ with st.sidebar.expander("Settings AI", expanded=False):
                 st.error(f"Errore Init AI: {e}")
 
 # --- 2. SIDEBAR: CLOUD SYNC ---
-render_cloud_sync_ui(DATA_FILE, is_sidebar=True)
+render_cloud_sync_ui(DATA_FILE, is_sidebar=True, session_data_key="portfolio_cloud_data")
 
 # --- 3. SIDEBAR: CHAT ---
 st.sidebar.divider()
@@ -193,7 +193,7 @@ if df_portfolio is None and os.path.exists(DATA_FILE):
         df_portfolio = pd.read_csv(
             DATA_FILE, sep=";"
         )  # Assuming semicolon for this portfolio file
-        st.warning(f"Using Local File: {DATA_FILE} (Cloud data not loaded)")
+        st.info(f"Using Local Cache: {DATA_FILE}")
     except Exception as e:
         st.error(f"Errore lettura file locale {DATA_FILE}: {e}")
 
@@ -256,19 +256,35 @@ if df_portfolio is not None:
                     "Valuta Transazione", ["EUR", "USD"], horizontal=True
                 )
 
-            txn_type = st.selectbox("Tipo", ["Buy", "Sell"], index=0)
+            mode = st.radio(
+                "Modalità", ["Delta (Buy/Sell)", "Assoluto (Set)"], horizontal=True
+            )
+
+            if mode == "Delta (Buy/Sell)":
+                txn_type = st.selectbox("Tipo", ["Buy", "Sell"], index=0)
+            else:
+                txn_type = "Buy"
 
             c3, c4 = st.columns(2)
             with c3:
+                shares_label = (
+                    "Totale Shares"
+                    if mode == "Assoluto (Set)"
+                    else "Quote (Shares)"
+                )
                 shares = st.number_input(
-                    "Quote (Shares)",
+                    shares_label,
                     min_value=0.0,
                     value=0.0,
                     step=0.000001,
                     format="%.6f",
                 )
             with c4:
-                price_label = f"Prezzo per Quota ({currency})"
+                price_label = (
+                    f"Prezzo Medio ({currency})"
+                    if mode == "Assoluto (Set)"
+                    else f"Prezzo per Quota ({currency})"
+                )
                 price_per_share = st.number_input(
                     price_label, min_value=0.0, value=0.0, step=0.01, format="%.2f"
                 )
@@ -380,88 +396,102 @@ if df_portfolio is not None:
                             else 0.0
                         )
 
-                        # 2. Calculate Transaction Impacts
-                        # Quote (Shares) from Input
-                        txn_shares = shares
-                        # Price from Input (in selected currency)
-                        txn_price = price_per_share
+                        if mode == "Delta (Buy/Sell)":
+                            # --- DELTA LOGIC (existing) ---
+                            txn_shares = shares
+                            txn_price = price_per_share
 
-                        # Deltas
-                        # Shares: Sell (-), Buy (+)
-                        delta_shares = txn_shares if txn_type == "Buy" else -txn_shares
-                        # Invested (Cash Flow): Buy (+), Sell (-) -> shares * price
-                        # Note: User specified: New_Invested = Old - (Shares * Price) for Sell.
-                        # Matches: delta_Value = Shares * Price. Buy adds it, Sell subtracts it.
-                        delta_value = (
-                            (txn_shares * txn_price)
-                            if txn_type == "Buy"
-                            else -(txn_shares * txn_price)
-                        )
-
-                        # 3. Apply to Active Bucket ONLY
-                        if currency == "EUR":
-                            # Update EUR
-                            new_invest_eur = cur_invest_eur + delta_value
-                            new_shares_eur_bucket = max(
-                                0, cur_shares_eur_bucket + delta_shares
+                            delta_shares = txn_shares if txn_type == "Buy" else -txn_shares
+                            delta_value = (
+                                (txn_shares * txn_price)
+                                if txn_type == "Buy"
+                                else -(txn_shares * txn_price)
                             )
 
-                            # Recalc EUR Cost
-                            if new_shares_eur_bucket > 0:
-                                new_cost_eur = new_invest_eur / new_shares_eur_bucket
+                            if currency == "EUR":
+                                new_invest_eur = cur_invest_eur + delta_value
+                                new_shares_eur_bucket = max(
+                                    0, cur_shares_eur_bucket + delta_shares
+                                )
+                                if new_shares_eur_bucket > 0:
+                                    new_cost_eur = new_invest_eur / new_shares_eur_bucket
+                                else:
+                                    new_cost_eur = 0.0
+                                df.at[idx, col_invest_eur] = new_invest_eur
+                                df.at[idx, col_cost_eur] = new_cost_eur
+                                new_invest_broker = cur_invest_broker + delta_value
+                                df.at[idx, col_invest] = new_invest_broker
                             else:
-                                new_cost_eur = 0.0
+                                new_invest_usd = cur_invest_usd + delta_value
+                                new_shares_usd_bucket = max(
+                                    0, cur_shares_usd_bucket + delta_shares
+                                )
+                                if new_shares_usd_bucket > 0:
+                                    new_cost_usd = new_invest_usd / new_shares_usd_bucket
+                                else:
+                                    new_cost_usd = 0.0
+                                df.at[idx, col_invest_usd] = new_invest_usd
+                                df.at[idx, col_cost_usd] = new_cost_usd
 
-                            # Write changes to DataFrame (EUR)
-                            df.at[idx, col_invest_eur] = new_invest_eur
-                            df.at[idx, col_cost_eur] = new_cost_eur
+                            new_shares_broker = max(0, cur_shares_broker + delta_shares)
+                            df.at[idx, col_shares] = new_shares_broker
 
-                            # Update Broker (EUR)
-                            new_invest_broker = cur_invest_broker + delta_value
-                            df.at[idx, col_invest] = new_invest_broker
+                            cur_total_shares = get_val(df.loc[idx], "Shares")
+                            new_total_shares = max(0, cur_total_shares + delta_shares)
+                            df.at[idx, "Shares"] = new_total_shares
 
-                        else:  # USD
-                            # Update USD
-                            new_invest_usd = cur_invest_usd + delta_value
-                            new_shares_usd_bucket = max(
-                                0, cur_shares_usd_bucket + delta_shares
-                            )
-
-                            # Recalc USD Cost
-                            if new_shares_usd_bucket > 0:
-                                new_cost_usd = new_invest_usd / new_shares_usd_bucket
+                            current_invest_broker_final = get_val(df.loc[idx], col_invest)
+                            if new_shares_broker > 0:
+                                df.at[idx, col_avg] = (
+                                    current_invest_broker_final / new_shares_broker
+                                )
                             else:
-                                new_cost_usd = 0.0
+                                df.at[idx, col_avg] = 0
 
-                            # Write changes to DataFrame (USD)
-                            df.at[idx, col_invest_usd] = new_invest_usd
-                            df.at[idx, col_cost_usd] = new_cost_usd
+                            success_msg = f"Aggiornato {new_ticker} ({currency})! Delta: {txn_type} {txn_shares} shares."
 
-                            # Broker (EUR) UNCHANGED
-                            # We do NOT touch col_invest (EUR) for this broker if dealing in USD
-
-                        # 4. Global & Broker Shares Updates (Always)
-                        new_shares_broker = max(0, cur_shares_broker + delta_shares)
-                        df.at[idx, col_shares] = new_shares_broker
-
-                        cur_total_shares = get_val(df.loc[idx], "Shares")
-                        new_total_shares = max(0, cur_total_shares + delta_shares)
-                        df.at[idx, "Shares"] = new_total_shares
-
-                        # 5. Broker Average Cost (Legacy - update if we changed broker shares/invest)
-                        # If EUR txn, we updated Invest and Shares.
-                        # If USD txn, we updated Shares, but NOT Invest (EUR).
-                        # So Broker Avg Cost (EUR) changes in both cases?
-                        # If USD txn: Broker Invest (EUR) static, Shares changed. Avg Cost (EUR) changes.
-                        current_invest_broker_final = get_val(
-                            df.loc[idx], col_invest
-                        )  # Might be new or old
-                        if new_shares_broker > 0:
-                            df.at[idx, col_avg] = (
-                                current_invest_broker_final / new_shares_broker
-                            )
                         else:
-                            df.at[idx, col_avg] = 0
+                            # --- ASSOLUTO LOGIC ---
+                            new_shares = shares
+                            new_avg_cost = price_per_share
+
+                            # 1. Broker columns
+                            df.at[idx, col_shares] = new_shares
+                            df.at[idx, col_avg] = new_avg_cost
+                            df.at[idx, col_invest] = new_shares * new_avg_cost
+
+                            # 2. Global Shares = somma di tutti i broker shares
+                            broker_shares_cols = [
+                                c for c in df.columns
+                                if c.strip().endswith("Shares") and c.strip() != "Shares"
+                            ]
+                            total_shares = sum(
+                                get_val(df.loc[idx], c) for c in broker_shares_cols
+                            )
+                            df.at[idx, "Shares"] = total_shares
+
+                            if currency == "EUR":
+                                # 3. EUR bucket = somma di tutti i broker investment in EUR
+                                broker_invest_cols = [
+                                    c for c in df.columns
+                                    if "Investment" in c
+                                ]
+                                total_invested_eur = sum(
+                                    get_val(df.loc[idx], c) for c in broker_invest_cols
+                                )
+                                df.at[idx, col_invest_eur] = total_invested_eur
+                                if total_shares > 0:
+                                    df.at[idx, col_cost_eur] = (
+                                        total_invested_eur / total_shares
+                                    )
+                                else:
+                                    df.at[idx, col_cost_eur] = 0.0
+                            else:
+                                # 3. USD bucket = valore assoluto sul broker selezionato
+                                df.at[idx, col_invest_usd] = new_shares * new_avg_cost
+                                df.at[idx, col_cost_usd] = new_avg_cost
+
+                            success_msg = f"Aggiornato {new_ticker} ({currency})! Assoluto: {new_shares} shares @ {new_avg_cost}"
 
                         df.at[idx, "Last Purchase (YY-MM-DD)"] = txn_date.strftime(
                             "%Y-%m-%d"
@@ -472,10 +502,11 @@ if df_portfolio is not None:
                         csv_buffer = io.StringIO()
                         df_portfolio.to_csv(csv_buffer, sep=";", index=False)
                         st.session_state[KEY_DATA] = csv_buffer.getvalue()
+                        # Salva anche su disco per il pulsante Push
+                        with open(DATA_FILE, "w", encoding="utf-8") as f:
+                            f.write(csv_buffer.getvalue())
 
-                        st.success(
-                            f"Aggiornato {new_ticker} ({currency})! Logic: {txn_type} {txn_shares} shares."
-                        )
+                        st.success(success_msg)
                         st.rerun()
 
                     except Exception as e:
