@@ -5,6 +5,7 @@ from modules import stock_utils
 # from modules.llm_utils import ... (Removed)
 
 import warnings
+import atexit
 from datetime import datetime as dtm
 import requests
 import streamlit as st
@@ -34,6 +35,19 @@ st.caption(
 )
 
 DATA_FILE = "My_Portfolio.csv"
+
+
+def _cleanup_local_csv() -> None:
+    """Elimina il file CSV locale alla chiusura dell'app per evitare commit Git."""
+    if os.path.exists(DATA_FILE):
+        try:
+            os.remove(DATA_FILE)
+        except OSError:
+            pass  # Silenzioso, meglio non bloccare la chiusura
+
+
+atexit.register(_cleanup_local_csv)
+
 
 # --- 1. SIDEBAR: AI CONFIGURATION ---
 st.sidebar.header("🤖 Configurazione AI")
