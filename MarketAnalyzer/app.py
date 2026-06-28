@@ -12,8 +12,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pandas as pd
-import streamlit as st
+from dotenv import load_dotenv
+
+_PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(_PROJECT_ROOT / ".env")
+
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
 
 _PROJECT_ROOT = Path(__file__).resolve().parent
 _OCS_REPO = "https://github.com/anomalyco/opencode-skills.git"
