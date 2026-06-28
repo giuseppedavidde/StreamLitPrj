@@ -1,3 +1,6 @@
+# ── Repositories ────────────────────────────
+vendor/opencode-skills/
+
 # ── Python ──────────────────────────────────
 __pycache__/
 *.py[cod]

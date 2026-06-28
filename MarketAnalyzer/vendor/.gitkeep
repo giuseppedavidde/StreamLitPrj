@@ -1,0 +1,7 @@
+This directory holds external dependencies cloned/symlinked by setup.sh.
+
+Run `./setup.sh` to clone https://github.com/anomalyco/opencode-skills
+into vendor/opencode-skills/ and install the trading-mcp-server package.
+
+For local development with an existing sibling clone:
+    ./setup.sh --link
