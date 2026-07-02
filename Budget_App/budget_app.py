@@ -122,7 +122,40 @@ if not df.empty:
         ["Dashboard", "Gestione Dati", "Gestione Mese", "💬 Assistant AI"],
     )
 
-    # --- PAGINA DASHBOARD ---
+    # --- AI CONFIGURATION UNIFICATA (Sidebar — SEMPRE VISIBILE, AUTO-ATTIVAZIONE) ---
+    st.sidebar.divider()
+    with st.sidebar.expander("🤖 AI Configuration", expanded=False):
+        if AIProvider and OpencodeAgent:
+            provider, model = AIProvider.render_streamlit_sidebar()
+
+            # Auto-attiva al cambiamento di provider/modello
+            config_key = f"{provider}|{model or ''}"
+            prev_key = st.session_state.get("_ai_config_key", "")
+
+            if config_key != prev_key:
+                st.session_state["_ai_config_key"] = config_key
+                if provider and model:
+                    try:
+                        # Configura sempre AIProvider
+                        st.session_state["ai_provider"] = AIProvider(
+                            provider_type=provider,
+                            model_name=model,
+                        )
+                        # Se OpenCode Go, configura anche OpencodeAgent
+                        if provider == "opencode":
+                            oc_model = (
+                                model
+                                if model.startswith("opencode-go/")
+                                else f"opencode-go/{model}"
+                            )
+                            st.session_state["opencode_agent"] = OpencodeAgent(
+                                OpencodeConfig(model=oc_model, timeout=300)
+                            )
+                        else:
+                            st.session_state.pop("opencode_agent", None)
+                    except Exception:
+                        pass  # Errore silenzioso, l'utente vedrà il problema al primo utilizzo
+
     # --- PAGINA DASHBOARD ---
     if page == "Dashboard":
         # Custom CSS per card effect
@@ -162,34 +195,6 @@ if not df.empty:
 
         # Ri-ordiniamo decrescente per la visualizzazione (Mese corrente in alto)
         df = df_sorted_asc.sort_values("DateObj", ascending=False)
-
-        # --- 1. SETTINGS INTELLIGENZA ARTIFICIALE (Sidebar) ---
-        st.sidebar.divider()
-        with st.sidebar.expander("🤖 Configurazione AI", expanded=False):
-            if AIProvider:
-                provider, model = AIProvider.render_streamlit_sidebar()
-                if st.button("Applica Configurazione AI"):
-                    try:
-                        st.session_state["ai_provider"] = AIProvider(
-                            provider_type=provider,
-                            model_name=model,
-                        )
-                        st.toast(
-                            f"AI Attivata: {provider} ({model})", icon="🟢"
-                        )
-                    except Exception as e:
-                        st.error(f"Errore Init AI: {e}")
-
-        # --- 1c. OPENCODE AGENT (Sidebar) ---
-        st.sidebar.divider()
-        if OpencodeAgent:
-            opencode_cfg = OpencodeAgent.render_streamlit_sidebar()
-            if opencode_cfg:
-                st.session_state["opencode_agent"] = OpencodeAgent(
-                    opencode_cfg
-                )
-            else:
-                st.session_state.pop("opencode_agent", None)
 
         # --- 1b. CLOUD DATA SYNC (Sidebar) ---
         render_cloud_sync_ui(DATA_FILE, is_sidebar=True)
@@ -718,7 +723,7 @@ if not df.empty:
                 )
                 if not has_ai and not has_oc:
                     st.error(
-                        "⚠️ AI/OpenCode non configurata! Configura AI nella sidebar o attiva OpenCode Agent."
+                        "⚠️ AI non configurata! Seleziona un provider e modello nella sidebar (🤖 AI Configuration)."
                     )
                 else:
                     if st.button("🚀 Analizza e Categorizza"):
@@ -1025,7 +1030,7 @@ if not df.empty:
         )
         if not has_ai and not has_oc:
             st.warning(
-                "⚠️ Configura l'AI nella sidebar oppure attiva OpenCode Agent per parlare con l'assistente."
+                "⚠️ Seleziona un provider e modello nella sidebar (🤖 AI Configuration) per parlare con l'assistente."
             )
         else:
             # 1. Inizializza cronologia chat

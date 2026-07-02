@@ -34,3 +34,4 @@ budget_database.csv.bak
 Export_from_Bank/*
 agents_backup/*
 agents/*
+*.csv
