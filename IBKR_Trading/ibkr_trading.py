@@ -356,16 +356,20 @@ st.sidebar.title("IBKR Gateway")
 _IB_GW_PATH = shutil.which("ib-gw") or "/usr/bin/ib-gw"
 _ib_gw_available = os.path.isfile(_IB_GW_PATH) and os.access(_IB_GW_PATH, os.X_OK)
 
-# Trading mode selector — determines the port automatically
-trading_mode = st.sidebar.radio(
-    "Trading Mode",
-    ["📄 Paper Trading", "💰 Normal Trading"],
+# Port selector — TWS and IB Gateway ports
+_PORT_OPTIONS: dict[str, int] = {
+    "TWS Paper 📄 (7497)": 7497,
+    "TWS Live 💰 (7496)": 7496,
+    "IB Gateway Paper 📄 (4002)": 4002,
+    "IB Gateway Live 💰 (4001)": 4001,
+}
+_port_label = st.sidebar.selectbox(
+    "API Port",
+    options=list(_PORT_OPTIONS.keys()),
     index=0,
-    horizontal=True,
-    help="Paper Trading uses port 7497, Normal Trading uses port 7496.",
+    help="Select the API port matching your running TWS or IB Gateway instance.",
 )
-_is_paper = trading_mode.startswith("📄")
-_auto_port = 7497 if _is_paper else 7496
+_auto_port = _PORT_OPTIONS[_port_label]
 
 # Gateway process status helper
 def _is_gw_running() -> bool:
@@ -1815,6 +1819,134 @@ if st.button("Fetch Data & Analyze", disabled=not can_fetch):
             print(f"[ERROR] Fetch failed: {type(e).__name__}: {e}")
             traceback.print_exc()
             st.error(f"Error ({type(e).__name__}): {e}")
+
+
+# ─── Portfolio Section ───────────────────────────────────────────────────────
+
+with st.expander("📋 Portfolio Positions", expanded=False):
+    st.markdown("Fetch your current IBKR portfolio positions and export them to CSV.")
+
+    col_port1, col_port2 = st.columns([3, 1])
+    with col_port1:
+        fetch_pos = st.button(
+            "📥 Fetch Portfolio Positions",
+            type="primary",
+            disabled=not st.session_state.connector.connected,
+            use_container_width=True,
+        )
+    with col_port2:
+        st.markdown("")  # vertical alignment spacer
+
+    if fetch_pos:
+        with st.spinner("📡 Fetching positions from IBKR …"):
+            try:
+                raw_positions = st.session_state.connector.get_positions()
+                if not raw_positions:
+                    st.info("ℹ️ No positions found in your portfolio.")
+                    st.session_state.pop("portfolio_positions", None)
+                    st.session_state.pop("portfolio_export_csv", None)
+                else:
+                    df_pos = pd.DataFrame(raw_positions)
+
+                    # Format columns for display
+                    display_cols = [
+                        "symbol", "sec_type", "currency", "position", "market_price",
+                        "market_value", "average_cost", "unrealized_pnl",
+                        "realized_pnl", "expiry", "strike", "right",
+                    ]
+                    df_display = df_pos[[c for c in display_cols if c in df_pos.columns]].copy()
+
+                    # Round numeric columns
+                    for col in df_display.select_dtypes(include="number").columns:
+                        df_display[col] = df_display[col].round(2)
+
+                    st.session_state["portfolio_positions"] = df_display
+
+                    # Build CSV for download
+                    csv_buffer = df_pos.to_csv(index=False).encode("utf-8")
+                    st.session_state["portfolio_export_csv"] = csv_buffer
+
+                    st.success(f"✅ {len(raw_positions)} position(s) fetched.")
+
+            except Exception as e:
+                st.error(f"❌ Failed to fetch positions: {e}")
+                print(f"[ERROR] Portfolio fetch: {type(e).__name__}: {e}")
+
+    # Show cached positions if available
+    if st.session_state.get("portfolio_positions") is not None:
+        df_pos = st.session_state["portfolio_positions"]
+        csv_data = st.session_state.get("portfolio_export_csv")
+
+        # Per-currency summary metrics
+        CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "CHF": "CHF", "JPY": "¥"}
+
+        has_currency = "currency" in df_pos.columns
+        if has_currency and not df_pos["currency"].isna().all():
+            groups = df_pos.groupby("currency")
+
+            for curr, group in sorted(groups, key=lambda x: x[0]):
+                sym = CURRENCY_SYMBOLS.get(curr, curr)
+                cnt = len(group)
+                mv = group["market_value"].sum() if "market_value" in group.columns else 0
+                upnl = group["unrealized_pnl"].sum() if "unrealized_pnl" in group.columns else 0
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"📊 {sym} Positions", cnt)
+                c2.metric(f"💰 {sym} Market Value", f"{sym}{mv:,.2f}")
+                c3.metric(f"📈 {sym} Unrealized P&L", f"{sym}{upnl:+,.2f}",
+                          delta_color="normal" if upnl >= 0 else "inverse")
+
+            # Grand total only when all positions share the same currency
+            if len(groups) == 1:
+                curr = list(groups.groups.keys())[0]
+                sym = CURRENCY_SYMBOLS.get(curr, curr)
+                tot_mv = df_pos["market_value"].sum() if "market_value" in df_pos.columns else 0
+                tot_upnl = df_pos["unrealized_pnl"].sum() if "unrealized_pnl" in df_pos.columns else 0
+                st.divider()
+                m1, m2, m3 = st.columns(3)
+                m1.metric("📊 Total Positions", len(df_pos))
+                m2.metric("💰 Total Market Value", f"{sym}{tot_mv:,.2f}")
+                m3.metric("📈 Total Unrealized P&L", f"{sym}{tot_upnl:+,.2f}",
+                          delta_color="normal" if tot_upnl >= 0 else "inverse")
+        else:
+            # Fallback when no currency column exists
+            tot_mv = df_pos["market_value"].sum() if "market_value" in df_pos.columns else 0
+            tot_upnl = df_pos["unrealized_pnl"].sum() if "unrealized_pnl" in df_pos.columns else 0
+            m1, m2, m3 = st.columns(3)
+            m1.metric("📊 Total Positions", len(df_pos))
+            m2.metric("💰 Market Value", f"${tot_mv:,.2f}")
+            m3.metric("📈 Unrealized P&L", f"${tot_upnl:+,.2f}",
+                      delta_color="normal" if tot_upnl >= 0 else "inverse")
+
+        # Interactive table — dollar formatting only on monetary columns
+        DOLLAR_COLS = [
+            "market_price", "market_value", "average_cost",
+            "unrealized_pnl", "realized_pnl",
+        ]
+        numeric_cols = df_pos.select_dtypes(include="number").columns
+        fmt_map = {}
+        for c in numeric_cols:
+            if c in DOLLAR_COLS:
+                fmt_map[c] = "${:,.2f}"
+            else:
+                fmt_map[c] = "{:,.2f}"
+        st.dataframe(
+            df_pos.style.format(fmt_map),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Download button
+        if csv_data is not None:
+            import datetime as _dt
+            _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label="⬇️ Download CSV",
+                data=csv_data,
+                file_name=f"ibkr_positions_{_ts}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                icon="📥",
+            )
 
 
 # ─── Chart & Stats (persistent after fetch) ─────────────────────────────────

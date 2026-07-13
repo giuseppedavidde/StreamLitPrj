@@ -811,6 +811,73 @@ class IBKRConnector:
         return results
 
 
+    def get_positions(self, account: str = "") -> list[dict]:
+        """Fetch all portfolio positions from IBKR.
+
+        Reads from the already-populated portfolio cache (ib_async calls
+        reqAccountUpdates automatically at connect time). Falls back to
+        reqPositions if the cache is empty.
+        Returns a list of normalized dicts with position details including
+        contract info, quantity, market value, cost basis, and P&L.
+        Works for stocks, options, futures, etc.
+
+        Args:
+            account: Optional account filter (e.g. 'DU123456'). Leave blank
+                     for all accounts.
+
+        Returns:
+            list[dict]: Each dict contains flat position data.
+        """
+        if not self.is_ready():
+            raise ConnectionError("Not connected to IBKR.")
+
+        self._ensure_loop()
+
+        # Portfolio cache is already populated by ib_async at connect time.
+        raw: list = self.ib.portfolio(account)
+        if not raw:
+            # Fallback: explicitly request positions (non-blocking variant)
+            self.ib.client.reqAccountUpdates(True, account)
+            for _ in range(30):
+                self.ib.sleep(0.1)
+                raw = self.ib.portfolio(account)
+                if raw:
+                    break
+
+        positions = []
+
+        for item in raw:
+            c = item.contract
+            # Normalise option-specific fields safely
+            expiry = getattr(c, "lastTradeDateOrContractMonth", None) or ""
+            strike = getattr(c, "strike", None) or 0.0
+            right = getattr(c, "right", None) or ""
+            multiplier = getattr(c, "multiplier", None) or ""
+
+            pos = {
+                "symbol": c.symbol,
+                "sec_type": c.secType,
+                "currency": c.currency,
+                "exchange": c.exchange,
+                "position": item.position,
+                "market_price": item.marketPrice,
+                "market_value": item.marketValue,
+                "average_cost": item.averageCost,
+                "cost_basis": abs(item.position) * item.averageCost if item.position else 0.0,
+                "unrealized_pnl": item.unrealizedPNL,
+                "realized_pnl": item.realizedPNL,
+                "account": item.account,
+                # Option-specific
+                "expiry": expiry,
+                "strike": float(strike) if strike else 0.0,
+                "right": right,
+                "multiplier": multiplier,
+            }
+            positions.append(pos)
+
+        return positions
+
+
 if __name__ == "__main__":
     connector = IBKRConnector()
     try:

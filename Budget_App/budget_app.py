@@ -31,24 +31,10 @@ st.set_page_config(page_title="Budget Manager", page_icon="💰", layout="wide")
 
 DATA_FILE = "budget_database.csv"
 
-
-# --- Funzioni di Caricamento e Salvataggio ---
-def load_data():
-    """Carica i dati dal file CSV"""
-    try:
-        df = pd.read_csv(DATA_FILE)
-        # Assicuriamoci che i dati siano ordinati
-        df = df.sort_values(by=["Year", "MonthNum"], ascending=[False, False])
-        return df
-    except FileNotFoundError:
-        st.error(f"File {DATA_FILE} non trovato. Esegui prima lo script di migrazione!")
-        return pd.DataFrame()
-
-
-def save_data(df):
-    """Salva i dati nel file CSV"""
-    df.to_csv(DATA_FILE, index=False)
-    st.toast("Dati salvati con successo!", icon="✅")
+import db
+db.init_db()
+if db.load_data().empty and os.path.exists(DATA_FILE):
+    db.migrate_from_csv(DATA_FILE)
 
 
 # --- Calcoli ---
@@ -111,7 +97,7 @@ except ImportError:
 
 st.title("💰 Gestione Budget Personale")
 
-df = load_data()
+df = db.load_data()
 
 if not df.empty:
     df, expense_cols, income_cols = calculate_metrics(df)
@@ -156,6 +142,19 @@ if not df.empty:
                     except Exception:
                         pass  # Errore silenzioso, l'utente vedrà il problema al primo utilizzo
 
+    # --- DATABASE STATUS (Sidebar — SEMPRE VISIBILE) ---
+    st.sidebar.divider()
+    with st.sidebar.expander("💾 Database", expanded=False):
+        info = db.get_db_info()
+        st.caption(f"**File:** `{info['db_path']}`")
+        st.caption(f"**Dimensione:** {info['db_size_kb']:.1f} KB")
+        st.caption(f"**Records:** {info['row_count']}")
+        if info['last_backup_time']:
+            st.caption(f"**Ultimo backup:** {info['last_backup_time']}")
+        if st.button("📥 Export CSV", key="db_export_csv"):
+            db.export_to_csv(DATA_FILE)
+            st.toast("CSV exportato!", icon="✅")
+
     # --- PAGINA DASHBOARD ---
     if page == "Dashboard":
         # Custom CSS per card effect
@@ -197,7 +196,9 @@ if not df.empty:
         df = df_sorted_asc.sort_values("DateObj", ascending=False)
 
         # --- 1b. CLOUD DATA SYNC (Sidebar) ---
+        db.export_to_csv(DATA_FILE)
         render_cloud_sync_ui(DATA_FILE, is_sidebar=True)
+        db.migrate_from_csv(DATA_FILE, force=True)
 
         # --- 2. FILTRI TEMPORALI (Sidebar) ---
         st.sidebar.divider()
@@ -693,8 +694,16 @@ if not df.empty:
 
         # Pulsante per salvare
         if st.button("Salva Modifiche", type="primary"):
-            # Salviamo solo le colonne editabili, i totali si ricalcolano al reload
-            save_data(edited_df)
+            full_df = db.load_data()
+            for col in edited_df.columns:
+                if col in full_df.columns:
+                    full_df.loc[edited_df.index.intersection(full_df.index), col] = (
+                        edited_df.loc[edited_df.index.intersection(full_df.index), col]
+                    )
+            new_rows = edited_df[~edited_df.index.isin(full_df.index)]
+            if not new_rows.empty:
+                full_df = pd.concat([full_df, new_rows], ignore_index=True)
+            db.save_data(full_df)
             st.rerun()
 
     # --- PAGINA GESTIONE MESE (AGGIUNGI/INCREMENTA) ---
@@ -880,7 +889,7 @@ if not df.empty:
                                 df = pd.concat([df, filtered_row], ignore_index=True)
                                 st.toast(f"Creato nuovo mese {month} {year}", icon="✨")
 
-                        save_data(df)
+                        db.save_data(df)
                         st.success(
                             "Importazione completata con successo! I dati sono stati salvati."
                         )
@@ -989,7 +998,7 @@ if not df.empty:
                         if val != 0:
                             df.loc[existing_mask, col] += val
 
-                    save_data(df)
+                    db.save_data(df)
                     st.success(f"Dati aggiornati per {month_input} {year_input}!")
                     st.rerun()
 
@@ -1010,7 +1019,7 @@ if not df.empty:
                     new_df = pd.DataFrame([new_row])
                     updated_df = pd.concat([new_df, base_df], ignore_index=True)
 
-                    save_data(updated_df)
+                    db.save_data(updated_df)
                     st.success("Mese creato con successo!")
                     st.rerun()
 
@@ -1154,7 +1163,9 @@ else:
     with col_cloud:
         st.subheader("☁️ Scarica da Cloud (GitHub)")
         st.write("Collega il tuo account GitHub per scaricare il database.")
+        db.export_to_csv(DATA_FILE)
         render_cloud_sync_ui(DATA_FILE, is_sidebar=False)
+        db.migrate_from_csv(DATA_FILE, force=True)
 
     with col_local:
         st.subheader("📂 Carica CSV Locale")
@@ -1163,11 +1174,11 @@ else:
 
         if uploaded_file is not None:
             try:
-                # Leggi per validare (opzionale) o salva direttamente
-                with open(DATA_FILE, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                st.success(f"File salvato come {DATA_FILE}! Riavvio app...")
+                import pandas as pd
+                df_uploaded = pd.read_csv(uploaded_file)
+                db.save_data(df_uploaded)
+                st.success("Database importato! Riavvio app...")
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Errore salvataggio: {e}")
+                st.error(f"Errore importazione: {e}")

@@ -12,7 +12,7 @@ env/
 .env
 
 # Streamlit
-.streamlit/ secrets.toml
+.streamlit/secrets.toml
 
 # Data (se vuoi ignorare il database CSV generato)
 # budget_database.csv
@@ -35,3 +35,9 @@ Export_from_Bank/*
 agents_backup/*
 agents/*
 *.csv
+
+# SQLite database
+budget.db
+budget.db.bak
+budget.db-wal
+budget.db-shm
