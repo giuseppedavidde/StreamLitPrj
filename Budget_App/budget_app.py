@@ -17,7 +17,7 @@ try:
     from agents.ai_provider import AIProvider
     from agents.cloud_manager import CloudManager
     from agents.bank_importer import BankImporter
-    from agents.opencode_agent import OpencodeAgent
+    from agents.opencode_agent import OpencodeAgent, OpencodeConfig
 except ImportError as e:
     st.error(f"Modulo 'agents' non trovato o errore importazione: {e}")
     AIProvider = None
@@ -114,11 +114,16 @@ if not df.empty:
         if AIProvider and OpencodeAgent:
             provider, model = AIProvider.render_streamlit_sidebar()
 
-            # Auto-attiva al cambiamento di provider/modello
+            # Auto-attiva al cambiamento di provider/modello, oppure se
+            # l'agente manca (sessione stantia da un errore precedente).
             config_key = f"{provider}|{model or ''}"
             prev_key = st.session_state.get("_ai_config_key", "")
+            needs_agent = (
+                provider == "opencode"
+                and "opencode_agent" not in st.session_state
+            )
 
-            if config_key != prev_key:
+            if config_key != prev_key or needs_agent:
                 st.session_state["_ai_config_key"] = config_key
                 if provider and model:
                     try:
@@ -140,7 +145,12 @@ if not df.empty:
                         else:
                             st.session_state.pop("opencode_agent", None)
                     except Exception:
-                        pass  # Errore silenzioso, l'utente vedrà il problema al primo utilizzo
+                        # Se la configurazione fallisce, resetta la key e gli
+                        # agenti per ritentare al prossimo rerun (niente stato
+                        # "configurato" fantasma che manda la chat sul percorso API).
+                        st.session_state.pop("_ai_config_key", None)
+                        st.session_state.pop("opencode_agent", None)
+                        st.session_state.pop("ai_provider", None)
 
     # --- DATABASE STATUS (Sidebar — SEMPRE VISIBILE) ---
     st.sidebar.divider()
