@@ -1,5 +1,7 @@
 streamlit
 pandas
+numpy
+pydantic
 plotly
 ollama
 google-genai

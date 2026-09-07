@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS transactions (
 );
 """
 
+SCHEMA_BUDGET_TARGETS = """
+CREATE TABLE IF NOT EXISTS budget_targets (
+    category TEXT PRIMARY KEY,
+    monthly_target REAL NOT NULL DEFAULT 0.0
+);
+"""
+
 
 def get_connection() -> sqlite3.Connection:
     """Return connection with WAL mode and foreign keys enabled."""
@@ -73,6 +80,7 @@ def init_db():
     conn = get_connection()
     conn.execute(SCHEMA_MONTHLY_BUDGET)
     conn.execute(SCHEMA_TRANSACTIONS)
+    conn.execute(SCHEMA_BUDGET_TARGETS)
     conn.commit()
     conn.close()
 
@@ -181,6 +189,7 @@ def save_data(df):
     try:
         import streamlit as st
         st.toast("Dati salvati con successo!", icon="✅")
+        st.cache_data.clear()
     except ImportError:
         pass
 
@@ -195,6 +204,103 @@ def export_to_csv(filepath="budget_database.csv"):
     )
     conn.close()
     df.to_csv(filepath, index=False)
+
+
+def save_transactions(records):
+    """Atomically replace ALL transactions with the provided records.
+
+    Each record is a dict with keys: date, description, amount, category,
+    source, month_ref. Runs in a single transaction (delete + insert).
+    Returns the number of inserted rows.
+    """
+    rows = [
+        (
+            str(r.get("date", "")),
+            str(r.get("description", "")),
+            float(r.get("amount", 0.0)),
+            r.get("category"),
+            r.get("source"),
+            r.get("month_ref"),
+        )
+        for r in records
+    ]
+
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM transactions")
+        conn.executemany(
+            "INSERT INTO transactions (date, description, amount, category, source, month_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    try:
+        import streamlit as st
+        st.cache_data.clear()
+    except ImportError:
+        pass
+
+    return len(rows)
+
+
+def load_transactions(month_ref=None):
+    """Return transactions as a DataFrame, optionally filtered by month_ref."""
+    conn = get_connection()
+    if month_ref:
+        df = pd.read_sql_query(
+            'SELECT * FROM transactions WHERE month_ref = ? ORDER BY "date"',
+            conn,
+            params=(month_ref,),
+        )
+    else:
+        df = pd.read_sql_query('SELECT * FROM transactions ORDER BY "date"', conn)
+    conn.close()
+    return df
+
+
+def get_budget_targets():
+    """Return saved budget targets as a dict {category: monthly_target}."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT category, monthly_target FROM budget_targets"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.execute(SCHEMA_BUDGET_TARGETS)
+        conn.commit()
+        rows = []
+    conn.close()
+    return {r["category"]: r["monthly_target"] for r in rows}
+
+
+def save_budget_targets(targets):
+    """Replace all budget targets. `targets` is a dict {category: monthly_target}."""
+    conn = get_connection()
+    conn.execute(SCHEMA_BUDGET_TARGETS)
+    try:
+        conn.execute("DELETE FROM budget_targets")
+        conn.executemany(
+            "INSERT OR REPLACE INTO budget_targets (category, monthly_target) VALUES (?, ?)",
+            [(str(k), float(v)) for k, v in targets.items()],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    try:
+        import streamlit as st
+        st.cache_data.clear()
+    except ImportError:
+        pass
 
 
 def get_db_info() -> dict:
