@@ -132,6 +132,31 @@ def prepare_timeseries(df):
     return df_sorted_asc, df_desc
 
 
+def apply_optional_expense_filter(df, expense_cols, disabled_cats):
+    """Ricalcola i totali escludendo le categorie di spesa opzionali.
+
+    Le categorie in ``disabled_cats`` vengono rimosse dall'insieme ``expense_cols``
+    usato per ``Totale Uscite``, ``Reddito meno spese`` e ``Risparmio %``. Il
+    ``Patrimonio`` (cumsum di Reddito meno spese) viene ricalcolato a valle in
+    ``prepare_timeseries``; ``Investimenti_Cumulativo`` resta invariato (cumulo
+    degli investimenti, indipendente dal filtro). Ritorna (df, active_expense_cols).
+    """
+    active_expense_cols = [c for c in expense_cols if c not in disabled_cats]
+
+    df = df.copy()
+    df["Totale Uscite"] = df[active_expense_cols].sum(axis=1)
+    df["Reddito meno spese"] = df["Totale Entrate"] - df["Totale Uscite"]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        df["Risparmio %"] = np.where(
+            df["Totale Entrate"] != 0,
+            df["Reddito meno spese"] / df["Totale Entrate"] * 100.0,
+            0.0,
+        )
+
+    return df, active_expense_cols
+
+
 # --- P1.4 Forecast deterministico (no statsmodels) ---
 def build_forecast(df_sorted_asc, months=12, ci_z=1.28):
     """Proiezione del netto mensile ("Reddito meno spese") con:
@@ -386,10 +411,31 @@ def build_yoy_figure(df, sel_month, sel_year, years=3):
 
 # --- P1.3 Run-rate / burn-rate KPI ---
 def compute_runrate_metrics(df_sorted_asc, window=12):
-    """Metriche run-rate sugli ultimi `window` mesi."""
+    """Metriche run-rate sugli ultimi `window` mesi (media e mediana)."""
     tail = df_sorted_asc.tail(window)
-    avg_income = float(tail["Totale Entrate"].mean()) if not tail.empty else 0.0
-    avg_expense = float(tail["Totale Uscite"].mean()) if not tail.empty else 0.0
+    if tail.empty:
+        return {
+            "avg_income": 0.0,
+            "avg_expense": 0.0,
+            "avg_savings": 0.0,
+            "savings_rate": 0.0,
+            "median_income": 0.0,
+            "median_expense": 0.0,
+            "median_savings": 0.0,
+            "median_savings_rate": 0.0,
+            "income_series": [],
+            "expense_series": [],
+            "net_series": [],
+            "savings_rate_series": [],
+        }
+
+    income_series = tail["Totale Entrate"].astype(float)
+    expense_series = tail["Totale Uscite"].astype(float)
+    net_series = tail["Reddito meno spese"].astype(float)
+    savings_rate_series = tail["Risparmio %"].astype(float)
+
+    avg_income = float(income_series.mean())
+    avg_expense = float(expense_series.mean())
     avg_savings = avg_income - avg_expense
     savings_rate = (avg_savings / avg_income * 100.0) if avg_income else 0.0
 
@@ -398,10 +444,14 @@ def compute_runrate_metrics(df_sorted_asc, window=12):
         "avg_expense": avg_expense,
         "avg_savings": avg_savings,
         "savings_rate": savings_rate,
-        "income_series": tail["Totale Entrate"].astype(float).tolist(),
-        "expense_series": tail["Totale Uscite"].astype(float).tolist(),
-        "net_series": tail["Reddito meno spese"].astype(float).tolist(),
-        "savings_rate_series": tail["Risparmio %"].astype(float).tolist(),
+        "median_income": float(income_series.median()),
+        "median_expense": float(expense_series.median()),
+        "median_savings": float(net_series.median()),
+        "median_savings_rate": float(savings_rate_series.median()),
+        "income_series": income_series.tolist(),
+        "expense_series": expense_series.tolist(),
+        "net_series": net_series.tolist(),
+        "savings_rate_series": savings_rate_series.tolist(),
     }
 
 
@@ -425,6 +475,218 @@ def build_sparkline(values, color, fill=True):
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
+
+# --- P3 Statistiche Patrimonio (descrittive, pure — testabili senza Streamlit) ---
+_MONTHS_IT = {
+    1: "Gennaio",
+    2: "Febbraio",
+    3: "Marzo",
+    4: "Aprile",
+    5: "Maggio",
+    6: "Giugno",
+    7: "Luglio",
+    8: "Agosto",
+    9: "Settembre",
+    10: "Ottobre",
+    11: "Novembre",
+    12: "Dicembre",
+}
+
+
+def _month_label(dateobj) -> str:
+    """Etichetta leggibile 'Mese Anno' a partire da un Timestamp."""
+    return f"{_MONTHS_IT[dateobj.month]} {dateobj.year}"
+
+
+class DistributionStats(BaseModel):
+    """Statistiche descrittive di una serie mensile."""
+
+    mean: float = 0.0
+    median: float = 0.0
+    std: float = 0.0
+    min: float = 0.0
+    max: float = 0.0
+    p25: float = 0.0
+    p75: float = 0.0
+    min_month: str = ""
+    max_month: str = ""
+
+
+class SavingsStats(BaseModel):
+    """Statistiche del risparmio mensile netto (Reddito meno spese)."""
+
+    mean: float = 0.0
+    median: float = 0.0
+    std: float = 0.0
+    cv: float | None = None
+    positive_months_pct: float = 0.0
+    best_month: str = ""
+    best_value: float = 0.0
+    worst_month: str = ""
+    worst_value: float = 0.0
+
+
+class PatrimonioStats(BaseModel):
+    """Statistiche del patrimonio cumulativo."""
+
+    initial: float = 0.0
+    final: float = 0.0
+    cagr: float | None = None
+    cagr_note: str = ""
+    yoy_growth_pct: float | None = None
+    avg_yearly_accumulation: float = 0.0
+
+
+class StatsResult(BaseModel):
+    """Risultato completo delle statistiche patrimoniali."""
+
+    n_months: int = 0
+    income: DistributionStats = Field(default_factory=DistributionStats)
+    expense: DistributionStats = Field(default_factory=DistributionStats)
+    savings: SavingsStats = Field(default_factory=SavingsStats)
+    savings_rate: DistributionStats = Field(default_factory=DistributionStats)
+    patrimonio: PatrimonioStats = Field(default_factory=PatrimonioStats)
+    runway_months: float | None = None
+
+
+def _distribution_stats(series, dates) -> DistributionStats:
+    """Statistiche descrittive di una serie, con etichette dei mesi min/max."""
+    s = pd.Series(series).astype(float).reset_index(drop=True)
+    n = len(s)
+    if n == 0:
+        return DistributionStats()
+
+    imin = int(s.idxmin())
+    imax = int(s.idxmax())
+    return DistributionStats(
+        mean=float(s.mean()),
+        median=float(s.median()),
+        std=float(s.std(ddof=1)) if n > 1 else 0.0,
+        min=float(s.iloc[imin]),
+        max=float(s.iloc[imax]),
+        p25=float(s.quantile(0.25)),
+        p75=float(s.quantile(0.75)),
+        min_month=_month_label(dates.iloc[imin]),
+        max_month=_month_label(dates.iloc[imax]),
+    )
+
+
+def compute_stat_metrics(df_sorted_asc) -> StatsResult:
+    """Statistiche patrimoniali descrittive sull'intero storico.
+
+    Calcola distribuzioni (media/mediana/dev.std/min/max/P25/P75) di Entrate,
+    Uscite (già filtrate), Risparmio mensile e Tasso di Risparmio, oltre a
+    metriche del Patrimonio (CAGR, crescita YoY, accumulo medio annuo) e al
+    Runway (mesi di copertura della liquidità discrezionale).
+
+    Riceve `df_sorted_asc` già filtrato e con le colonne derivate ricalcolate
+    (output di ``prepare_timeseries``). Funzione pura: nessuna dipendenza da
+    Streamlit né scritture su DB/CSV.
+    """
+    df = df_sorted_asc.reset_index(drop=True)
+    if df.empty:
+        return StatsResult()
+
+    n = len(df)
+    income = df["Totale Entrate"].astype(float)
+    expense = df["Totale Uscite"].astype(float)
+    savings = df["Reddito meno spese"].astype(float)
+    rate = df["Risparmio %"].astype(float)
+    pat = df["Patrimonio"].astype(float)
+    invested = df["Investimenti_Cumulativo"].astype(float)
+    dates = df["DateObj"]
+
+    inc = _distribution_stats(income, dates)
+    exp = _distribution_stats(expense, dates)
+
+    # Risparmio mensile netto
+    sav_mean = float(savings.mean())
+    sav_std = float(savings.std(ddof=1)) if n > 1 else 0.0
+    cv = (sav_std / sav_mean) if sav_mean != 0 else None
+    pos_pct = float((savings > 0).mean() * 100.0)
+    ibest = int(savings.idxmax())
+    iworst = int(savings.idxmin())
+    sav_stats = SavingsStats(
+        mean=sav_mean,
+        median=float(savings.median()),
+        std=sav_std,
+        cv=cv,
+        positive_months_pct=pos_pct,
+        best_month=_month_label(dates.iloc[ibest]),
+        best_value=float(savings.iloc[ibest]),
+        worst_month=_month_label(dates.iloc[iworst]),
+        worst_value=float(savings.iloc[iworst]),
+    )
+
+    # Tasso di risparmio (%)
+    rate_stats = _distribution_stats(rate, dates)
+
+    # Patrimonio cumulativo
+    initial = float(pat.iloc[0])
+    final = float(pat.iloc[-1])
+
+    cagr: float | None = None
+    cagr_note = ""
+    if initial > 0:
+        eff_start_idx = 0
+    else:
+        pos_mask = pat > 0
+        if pos_mask.any():
+            eff_start_idx = int(pos_mask.idxmax())
+            cagr_note = (
+                f"partenza da {_month_label(dates.iloc[eff_start_idx])} "
+                "(primo mese con patrimonio > 0)"
+            )
+        else:
+            eff_start_idx = 0
+            cagr_note = "patrimonio mai positivo nel periodo"
+
+    eff_initial = float(pat.iloc[eff_start_idx])
+    n_cagr = n - eff_start_idx
+    if eff_initial > 0 and final > 0 and n_cagr > 0:
+        cagr = (final / eff_initial) ** (12.0 / n_cagr) - 1.0
+
+    # Crescita YoY: ultimo mese vs stesso mese dell'anno precedente
+    yoy: float | None = None
+    last = df.iloc[-1]
+    prev_mask = (df["Year"] == last["Year"] - 1) & (df["Month"] == last["Month"])
+    if prev_mask.any():
+        prev_pat = float(df.loc[prev_mask, "Patrimonio"].iloc[0])
+        if prev_pat != 0:
+            yoy = (final - prev_pat) / abs(prev_pat) * 100.0
+
+    # Accumulo medio annuo = patrimonio finale / anni trascorsi
+    years = n / 12.0
+    avg_yearly = (final / years) if years > 0 else 0.0
+
+    pat_stats = PatrimonioStats(
+        initial=initial,
+        final=final,
+        cagr=cagr,
+        cagr_note=cagr_note,
+        yoy_growth_pct=yoy,
+        avg_yearly_accumulation=avg_yearly,
+    )
+
+    # Runway = liquidità discrezionale / uscite medie mensili
+    avg_exp = float(expense.mean())
+    liquid = final - float(invested.iloc[-1])
+    runway: float | None = None
+    if avg_exp > 0:
+        runway = liquid / avg_exp
+        if runway <= 0:
+            runway = None
+
+    return StatsResult(
+        n_months=n,
+        income=inc,
+        expense=exp,
+        savings=sav_stats,
+        savings_rate=rate_stats,
+        patrimonio=pat_stats,
+        runway_months=(round(runway, 1) if runway is not None else None),
+    )
 
 
 # --- P2.2 Waterfall mensile ---
@@ -682,6 +944,31 @@ def main():
 
             st.header("📊 Dashboard")
 
+            # --- 0b. FILTRO SPESE OPZIONALI (solo vista, nessuna modifica ai dati) ---
+            with st.container(border=True):
+                st.caption("Filtro spese (vista)")
+                ft1, ft2 = st.columns(2)
+                incl_investimenti = ft1.toggle(
+                    "💼 Includi Investimenti nelle spese",
+                    value=True,
+                    key="incl_investimenti",
+                )
+                incl_straordinarie = ft2.toggle(
+                    "🎢 Includi Spese Straordinarie nelle spese",
+                    value=True,
+                    key="incl_straordinarie",
+                )
+
+            disabled_cats = []
+            if not incl_investimenti:
+                disabled_cats.append("Investimenti")
+            if not incl_straordinarie:
+                disabled_cats.append("Spese Straordinarie")
+
+            df, active_expense_cols = apply_optional_expense_filter(
+                df, expense_cols, disabled_cats
+            )
+
             # --- 0. PREPARAZIONE DATI GLOBALE ---
             df_sorted_asc, df = prepare_timeseries(df)
 
@@ -834,28 +1121,122 @@ def main():
             rc1, rc2, rc3, rc4 = st.columns(4)
             with rc1:
                 st.metric("Media Entrate", f"€ {runrate['avg_income']:,.0f}")
+                st.caption(f"Mediana: € {runrate['median_income']:,.0f}")
                 st.plotly_chart(
                     build_sparkline(runrate["income_series"], "#2ecc71"),
                     width="stretch",
                 )
             with rc2:
                 st.metric("Media Uscite", f"€ {runrate['avg_expense']:,.0f}")
+                st.caption(f"Mediana: € {runrate['median_expense']:,.0f}")
                 st.plotly_chart(
                     build_sparkline(runrate["expense_series"], "#e74c3c"),
                     width="stretch",
                 )
             with rc3:
                 st.metric("Risparmio Medio", f"€ {runrate['avg_savings']:,.0f}")
+                st.caption(f"Mediana: € {runrate['median_savings']:,.0f}")
                 st.plotly_chart(
                     build_sparkline(runrate["net_series"], "#f1c40f"),
                     width="stretch",
                 )
             with rc4:
                 st.metric("Tasso Risparmio", f"{runrate['savings_rate']:.1f}%")
+                st.caption(f"Mediana: {runrate['median_savings_rate']:.1f}%")
                 st.plotly_chart(
                     build_sparkline(runrate["savings_rate_series"], "#3498db"),
                     width="stretch",
                 )
+
+            # --- P3 STATISTICHE PATRIMONIO (descrittive, tutto lo storico) ---
+            stats = compute_stat_metrics(df_sorted_asc)
+            with st.container(border=True):
+                st.subheader("📊 Statistiche Patrimonio")
+                st.caption(
+                    f"Statistiche descrittive su tutto lo storico ({stats.n_months} mesi) "
+                    "— si aggiornano in tempo reale con i filtri spese attivi."
+                )
+
+                def _fmt_eur(v):
+                    return f"€ {v:,.0f}"
+
+                def _fmt_pct(v):
+                    return f"{v:.1f}%"
+
+                def _render_dist(d, fmt):
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Media", fmt(d.mean))
+                    m2.metric("Mediana", fmt(d.median))
+                    m3.metric("Dev. Std", fmt(d.std))
+                    m4, m5, m6 = st.columns(3)
+                    m4.metric("Min", fmt(d.min))
+                    m5.metric("Max", fmt(d.max))
+                    m6.metric("P25 / P75", f"{fmt(d.p25)} / {fmt(d.p75)}")
+                    st.caption(f"Mese min: {d.min_month} — Mese max: {d.max_month}")
+
+                st.markdown("**💰 Entrate · 💸 Uscite (filtrate)**")
+                c_inc, c_exp = st.columns(2)
+                with c_inc:
+                    st.caption("Entrate")
+                    _render_dist(stats.income, _fmt_eur)
+                with c_exp:
+                    st.caption("Uscite")
+                    _render_dist(stats.expense, _fmt_eur)
+
+                st.markdown("**🐷 Risparmio mensile netto · 📈 Tasso Risparmio**")
+                c_sav, c_rate = st.columns(2)
+                with c_sav:
+                    s = stats.savings
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Media", _fmt_eur(s.mean))
+                    m2.metric("Mediana", _fmt_eur(s.median))
+                    m3.metric("Dev. Std", _fmt_eur(s.std))
+                    cv_str = "n/a" if s.cv is None else f"{s.cv:.2f}"
+                    m4, m5, m6 = st.columns(3)
+                    m4.metric("CV (std/media)", cv_str)
+                    m5.metric("Mesi positivi", f"{s.positive_months_pct:.0f}%")
+                    m6.metric("Miglior mese", _fmt_eur(s.best_value))
+                    st.caption(
+                        f"Miglior mese: {s.best_month} — Peggior mese: "
+                        f"{s.worst_month} ({_fmt_eur(s.worst_value)})"
+                    )
+                with c_rate:
+                    st.caption("Tasso Risparmio")
+                    _render_dist(stats.savings_rate, _fmt_pct)
+
+                st.markdown("**🏦 Patrimonio · ⏳ Runway**")
+                c_pat, c_run = st.columns(2)
+                with c_pat:
+                    p = stats.patrimonio
+                    m1, m2 = st.columns(2)
+                    m1.metric("Iniziale", _fmt_eur(p.initial))
+                    m2.metric("Finale", _fmt_eur(p.final))
+                    m3, m4 = st.columns(2)
+                    cagr_str = "n/a" if p.cagr is None else f"{p.cagr * 100:.2f}%"
+                    m3.metric("CAGR", cagr_str)
+                    yoy_str = (
+                        "n/a" if p.yoy_growth_pct is None else f"{p.yoy_growth_pct:.1f}%"
+                    )
+                    m4.metric("Crescita YoY", yoy_str)
+                    m5, m6 = st.columns(2)
+                    m5.metric("Accumulo medio annuo", _fmt_eur(p.avg_yearly_accumulation))
+                    note_cagr = f" {p.cagr_note}." if p.cagr_note else ""
+                    st.caption(
+                        "CAGR = (fin/iniz)^(12/mesi) − 1, tasso annuo composto."
+                        f"{note_cagr}"
+                    )
+                with c_run:
+                    runway_str = (
+                        f"{stats.runway_months:.1f}"
+                        if stats.runway_months is not None
+                        else "n/a"
+                    )
+                    st.metric("Mesi di copertura", runway_str)
+                    st.caption(
+                        "Runway = (Patrimonio − Totale Investito) / Uscite medie mensili. "
+                        "La liquidità discrezionale è il Patrimonio al netto del cumulato "
+                        "investimenti; se ≤ 0 viene mostrato 'n/a'."
+                    )
 
             # --- 2b. EVOLUZIONE PATRIMONIO (P0.1 + P1.4 forecast) ---
             st.subheader("📈 Evoluzione Patrimonio (con proiezione 12 mesi)")
@@ -995,7 +1376,7 @@ def main():
 
                 st.write("")
 
-                expenses_only = selected_row[expense_cols]
+                expenses_only = selected_row[active_expense_cols]
                 top_cat = expenses_only.idxmax()
                 top_val = expenses_only.max()
 
@@ -1089,7 +1470,7 @@ def main():
             with st.container(border=True):
                 st.subheader(f"🌊 Waterfall — {ref_month_it} {sel_year}")
                 fig_waterfall = build_waterfall_figure(
-                    df, sel_month, sel_year, expense_cols, top_n=6
+                    df, sel_month, sel_year, active_expense_cols, top_n=6
                 )
                 st.plotly_chart(fig_waterfall, width="stretch")
 
@@ -1156,8 +1537,8 @@ def main():
                             )
 
                 with tab_periodo:
-                    period_expenses_sum = df_trend[expense_cols].sum()
-                    period_expenses_mean = df_trend[expense_cols].mean()
+                    period_expenses_sum = df_trend[active_expense_cols].sum()
+                    period_expenses_mean = df_trend[active_expense_cols].mean()
 
                     period_table_data = period_expenses_sum[period_expenses_sum != 0]
 
@@ -1213,8 +1594,10 @@ def main():
                 st.subheader("🎯 Benchmark: Spesa Effettiva vs Budget Pianificato")
 
                 targets = db.get_budget_targets()
-                historical_mean = df_sorted_asc[expense_cols].mean().astype(float)
-                defaults = {c: float(historical_mean.get(c, 0.0)) for c in expense_cols}
+                historical_mean = df_sorted_asc[active_expense_cols].mean().astype(float)
+                defaults = {
+                    c: float(historical_mean.get(c, 0.0)) for c in active_expense_cols
+                }
 
                 with st.expander("⚙️ Imposta Target Mensili per Categoria", expanded=False):
                     if not targets:
@@ -1223,10 +1606,10 @@ def main():
                         )
                     editor_df = pd.DataFrame(
                         {
-                            "Categoria": list(expense_cols),
+                            "Categoria": list(active_expense_cols),
                             "Target Mensile €": [
                                 round(targets.get(c, defaults.get(c, 0.0)), 2)
-                                for c in expense_cols
+                                for c in active_expense_cols
                             ],
                         }
                     )
@@ -1256,14 +1639,14 @@ def main():
                 if targets:
                     effective = {
                         c: float(targets.get(c, defaults.get(c, 0.0)))
-                        for c in expense_cols
+                        for c in active_expense_cols
                     }
                     c_bench, c_delta = st.columns(2)
                     with c_bench:
                         st.caption("Effettivo vs Target")
                         st.plotly_chart(
                             build_benchmark_figure(
-                                df, sel_month, sel_year, expense_cols, effective
+                                df, sel_month, sel_year, active_expense_cols, effective
                             ),
                             width="stretch",
                         )
@@ -1271,7 +1654,7 @@ def main():
                         st.caption("Scostamento (verde = sotto budget)")
                         st.plotly_chart(
                             build_benchmark_delta_figure(
-                                df, sel_month, sel_year, expense_cols, effective
+                                df, sel_month, sel_year, active_expense_cols, effective
                             ),
                             width="stretch",
                         )
@@ -1335,8 +1718,8 @@ def main():
                     st.subheader("🔍 Driver di Successo")
                     if not best_months.empty:
                         best_month_row = best_months.iloc[0]
-                        avg_expenses = df[expense_cols].mean()
-                        best_month_expenses = best_month_row[expense_cols]
+                        avg_expenses = df[active_expense_cols].mean()
+                        best_month_expenses = best_month_row[active_expense_cols]
 
                         diffs = best_month_expenses - avg_expenses
 
@@ -1451,7 +1834,7 @@ def main():
             with st.container(border=True):
                 st.subheader("📊 Trend Spese per Categoria")
                 fig_trend_cat = build_trend_category_figure(
-                    df_sorted_asc, expense_cols, top_n=5
+                    df_sorted_asc, active_expense_cols, top_n=5
                 )
                 st.plotly_chart(fig_trend_cat, width="stretch")
 
