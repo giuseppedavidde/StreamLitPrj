@@ -37,7 +37,7 @@ except ImportError:
         _st.error("Funzione Cloud UI non disponibile")
 
 
-DATA_FILE = "budget_database.csv"
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "budget_database.csv")
 
 import db
 
@@ -567,10 +567,30 @@ def load_data_cached():
     return db.load_data()
 
 
+def _apply_review_edits(detailed_df, edited, target_cats):
+    """Applica le modifiche della review (categorie + eliminazioni) al df.
+
+    Ritorna (detailed_df_aggiornato, n_righe_eliminate).
+    """
+    for i, orig_idx in enumerate(detailed_df.index):
+        new_cat = edited.iloc[i]["Categoria AI"]
+        if new_cat and new_cat in target_cats:
+            detailed_df.at[orig_idx, "New_Category"] = new_cat
+
+    rows_to_delete = edited[edited["🗑️ Elimina"] == True].index.tolist()
+    if rows_to_delete:
+        orig_indices_to_drop = [detailed_df.index[i] for i in rows_to_delete]
+        detailed_df = detailed_df.drop(orig_indices_to_drop)
+
+    return detailed_df, len(rows_to_delete)
+
+
 def main():
     st.set_page_config(page_title="Budget Manager", page_icon="💰", layout="wide")
 
-    db.init_db()
+    n_seeded = db.init_db()
+    if n_seeded:
+        st.toast(f"Mappatura seed importata: {n_seeded} voci", icon="🌱")
     if load_data_cached().empty and os.path.exists(DATA_FILE):
         db.migrate_from_csv(DATA_FILE)
         st.cache_data.clear()
@@ -1541,9 +1561,17 @@ def main():
                     report_md = results.get("report_md", "")
                     agg_df = results["aggregated_df"]
 
+                    # Snapshot della proposta AI (per rilevare le correzioni
+                    # manuali al momento del salvataggio — F5).
+                    if "Ai_Proposed" not in detailed_df.columns:
+                        detailed_df["Ai_Proposed"] = detailed_df["New_Category"]
+
                     st.subheader("🔍 Revisione Categorizzazione")
 
                     target_cats = sorted(income_cols + expense_cols)
+                    # Categorie valide per la review: target + 'Escluso' (opzione
+                    # valida della Selectbox per i trasferimenti/righe escluse).
+                    review_cats = sorted(set(target_cats) | {"Escluso"})
 
                     edit_df = detailed_df[["Std_Date", "Std_Description", "Betrag_Float", "Analyzed_Category", "New_Category"]].copy()
                     edit_df.columns = ["Data", "Descrizione", "Importo €", "Categoria Originale", "Categoria AI"]
@@ -1559,7 +1587,7 @@ def main():
                             "Categoria Originale": st.column_config.TextColumn("📁 Originale", disabled=True),
                             "Categoria AI": st.column_config.SelectboxColumn(
                                 "🏷️ Categoria AI",
-                                options=target_cats,
+                                options=review_cats,
                                 required=True,
                                 width="medium",
                             ),
@@ -1573,15 +1601,9 @@ def main():
                     )
 
                     if st.button("✅ Applica Modifiche", type="secondary", key="apply_inline_edits"):
-                        for i, orig_idx in enumerate(detailed_df.index):
-                            new_cat = edited.iloc[i]["Categoria AI"]
-                            if new_cat and new_cat in target_cats:
-                                detailed_df.at[orig_idx, "New_Category"] = new_cat
-
-                        rows_to_delete = edited[edited["🗑️ Elimina"] == True].index.tolist()
-                        if rows_to_delete:
-                            orig_indices_to_drop = [detailed_df.index[i] for i in rows_to_delete]
-                            detailed_df = detailed_df.drop(orig_indices_to_drop)
+                        detailed_df, n_deleted = _apply_review_edits(
+                            detailed_df, edited, review_cats
+                        )
 
                         dummy_importer = BankImporter(None)
                         new_agg = dummy_importer.aggregate_data(
@@ -1593,7 +1615,6 @@ def main():
                         st.session_state["import_results"]["aggregated_df"] = new_agg
                         st.session_state["import_results"]["report_md"] = new_rep
 
-                        n_deleted = len(rows_to_delete)
                         msg = "Categorie aggiornate!"
                         if n_deleted > 0:
                             msg += f" {n_deleted} righe eliminate."
@@ -1607,6 +1628,29 @@ def main():
 
                     if st.button("💾 Conferma e Salva nel Database", type="primary"):
                         try:
+                            # Applica eventuali modifiche della review non ancora
+                            # confermate (categorie + eliminazioni).
+                            detailed_df, _ = _apply_review_edits(
+                                detailed_df, edited, review_cats
+                            )
+
+                            # F5: memorizza le correzioni manuali dell'utente.
+                            # Solo le categorie modificate esplicitamente diventano
+                            # source='manual' (confidence 1.0); le proposte AI
+                            # lasciate invariate restano llm/seed.
+                            for _, row in detailed_df.iterrows():
+                                proposed = row.get("Ai_Proposed", "")
+                                final_cat = row.get("New_Category", "")
+                                desc = row.get("Std_Description", "")
+                                if final_cat and final_cat != proposed:
+                                    db.set_merchant_manual(desc, final_cat)
+
+                            # Ricomputa l'aggregato con le modifiche applicate.
+                            dummy_importer = BankImporter(None)
+                            agg_df = dummy_importer.aggregate_data(
+                                detailed_df, target_cats, income_cols
+                            )
+
                             for _, new_row in agg_df.iterrows():
                                 year = new_row["Year"]
                                 month = new_row["Month"]
@@ -1657,6 +1701,121 @@ def main():
 
                         except Exception as e:
                             st.error(f"Errore durante il salvataggio: {e}")
+
+            # --- F4: MAPPATURA NEGOZI -> CATEGORIE ---
+            with st.expander("🏪 Mappatura Negozi → Categorie", expanded=False):
+                try:
+                    merchant_entries = db.get_merchant_list()
+                    map_categories = sorted(
+                        set(income_cols + expense_cols + [e.category for e in merchant_entries])
+                    )
+
+                    if not merchant_entries:
+                        st.info(
+                            "La mappatura è vuota: l'import userà l'LLM per tutto. "
+                            "Il seed viene importato automaticamente all'avvio; "
+                            "puoi comunque importarlo qui sotto."
+                        )
+
+                    # Editor tabellare: modifiche qui diventano correzioni manuali.
+                    map_rows = [
+                        {
+                            "merchant": e.merchant,
+                            "category": e.category,
+                            "source": e.source,
+                            "times_seen": e.times_seen,
+                            "confidence": e.confidence,
+                        }
+                        for e in merchant_entries
+                    ]
+                    map_df = pd.DataFrame(map_rows)
+
+                    edited_map = st.data_editor(
+                        map_df,
+                        num_rows="dynamic",
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "merchant": st.column_config.TextColumn(
+                                "Negozio (normalizzato)", width="large"
+                            ),
+                            "category": st.column_config.SelectboxColumn(
+                                "Categoria", options=map_categories, required=True
+                            ),
+                            "source": st.column_config.TextColumn(
+                                "Origine", disabled=True, width="small"
+                            ),
+                            "times_seen": st.column_config.NumberColumn(
+                                "Volte", disabled=True, width="small"
+                            ),
+                            "confidence": st.column_config.ProgressColumn(
+                                "Confidenza", min_value=0.0, max_value=1.0
+                            ),
+                        },
+                        key="merchant_map_editor",
+                    )
+
+                    cm1, cm2, cm3 = st.columns([1, 1, 1])
+
+                    if cm1.button("💾 Salva modifiche", key="save_merchant_map"):
+                        original = {e.merchant: (e.category, e.source) for e in merchant_entries}
+                        edited_keys = set()
+                        for _, r in edited_map.iterrows():
+                            merchant = str(r.get("merchant", "") or "").strip()
+                            category = str(r.get("category", "") or "").strip()
+                            if not merchant or not category:
+                                continue
+                            key = db.normalize_merchant(merchant)
+                            edited_keys.add(key)
+                            orig = original.get(key)
+                            if orig is None or orig[0] != category:
+                                db.set_merchant_manual(merchant, category)
+
+                        # Righe rimosse dall'editor -> elimina dalla mappatura.
+                        for key in set(original) - edited_keys:
+                            db.delete_merchant(key)
+
+                        st.cache_data.clear()
+                        st.toast("Mappatura aggiornata (correzioni = manuale)!", icon="✅")
+                        time.sleep(0.5)
+                        st.rerun()
+
+                    if cm2.button("📥 Importa seed (merchant_seed.json)", key="import_merchant_seed"):
+                        n = db.seed_merchants_from_json("merchant_seed.json")
+                        if n > 0:
+                            st.cache_data.clear()
+                            st.toast(f"Seed importato: {n} voci.", icon="📥")
+                        elif merchant_entries:
+                            st.info("Seed già importato: la mappatura non è vuota.")
+                        else:
+                            st.info("File merchant_seed.json assente.")
+                        time.sleep(0.5)
+                        st.rerun()
+
+                    with cm3:
+                        st.caption(f"{len(merchant_entries)} voci in mappatura")
+
+                    # Eliminazione esplicita (selectbox sempre visibile).
+                    if merchant_entries:
+                        d1, d2 = st.columns([3, 1])
+                        del_sel = d1.selectbox(
+                            "Negozio da eliminare",
+                            [e.merchant for e in merchant_entries],
+                            key="del_merchant_sel",
+                        )
+                        if d2.button("🗑️ Elimina", key="confirm_del_merchant"):
+                            db.delete_merchant(del_sel)
+                            st.cache_data.clear()
+                            st.toast(f"Eliminato {del_sel}", icon="🗑️")
+                            time.sleep(0.5)
+                            st.rerun()
+
+                except Exception as exc:
+                    st.warning(
+                        "⚠️ Impossibile caricare la mappatura negozi in questo momento. "
+                        "Riprova riavviando l'app; il resto del programma continua a funzionare."
+                    )
+                    st.caption(f"Dettaglio: {exc}")
 
             st.divider()
             st.write("Oppure gestisci manualmente:")

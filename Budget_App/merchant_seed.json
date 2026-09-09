@@ -1,0 +1,1100 @@
+[
+  {
+    "merchant": "ALDI",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "ALIMENTACION",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "BEST VALUE DISCOUNT",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "BILLA",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "BORTOLUZZI",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "CASA AMETLLER",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "CONAD",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "CONDIS",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "DIPASSAGGIO",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "ENRIQUE TOMAS",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "EUROSPAR",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "FAMILA",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "INTERSPAR",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "IPERCONAD",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "LIDL",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "MAURY",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "MERCADONA",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "PASTISSERIA LA COLMENA",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "SHIAPANIS",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "SOLE 365",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "SPAR",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "STA.RE EISSERVICE",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "SUPERMERCAT PRODUCTO LATI",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "TOSANO",
+    "category": "Alimentari",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "ATM",
+    "category": "Bancomat",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Bankomat",
+    "category": "Bancomat",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "DISKONT",
+    "category": "Carburante",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "ESSO",
+    "category": "Carburante",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "JET",
+    "category": "Carburante",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "PV8628",
+    "category": "Carburante",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "TANKSTELLE VILLACH",
+    "category": "Carburante",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Autogrill",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Bar Gelateria La Fiesta",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Bar Pasticceria Texas",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Bella Piena",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Biest",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Cafe Restaurant Bar Ra",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Chez Paulette",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Coffeehouse",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Coffeina",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Dampferhuette",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Das Gruenfink",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Ditsch",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "El Caseron",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "El Nacional La Taperia",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Ella Kaffeeroesterei",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Enoteca Dawit",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Hungry Guy",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "I- Sushi",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Ipmatic",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Ivan Musio",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "KFC",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "La Piadineria",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "La.Ma. Service",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Lea Di Alessia Tiepolo",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Matcha Love",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "McDonalds",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "McMullens",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Mec Ragno",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Morro Fi",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Movida Mare",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Orient",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Origo Bakery",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Osteria Dal Nonno",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Pa Daurada",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Paninaro Born",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Pasterk",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Picnic",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Princesa 26",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Racers",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Rest. La Mestressa",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Restaurant Cremat",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Rstbar",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Salud",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "SE u SE",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Starbucks",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Stroeck",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Super Classic",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Sweet Lima",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Tabaccheria Ciccomascolo",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Tapas Away",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Terrazzamare",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "The Egglab",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Villa Meschik",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Yarra Cafe",
+    "category": "Cene, Pranzo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Fa Österreich - Spittal Villach",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Giacomo Minnella",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Giuseppe Davidde",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Habenzinsen (banca)",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Informazione banca",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Katja Stefanie Davidde",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Maria Rosaria Rossi",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Paolo Capogreco",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Revolut",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Tanya Davidde",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "TR Free Receipt",
+    "category": "Escluso",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Generali Versicherung",
+    "category": "Immobili (affitto, mutuo, tasse, assicurazione)",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "KELAG",
+    "category": "Immobili (affitto, mutuo, tasse, assicurazione)",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "UnipolTech",
+    "category": "Immobili (affitto, mutuo, tasse, assicurazione)",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "WSF Privatstiftung",
+    "category": "Immobili (affitto, mutuo, tasse, assicurazione)",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Bitpanda",
+    "category": "Investimenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Infineon Technologies",
+    "category": "Investimenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "S&P 500 USD (Acc)",
+    "category": "Investimenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Farmacia Dr Francesco",
+    "category": "Medicinali",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Mag Pharm",
+    "category": "Medicinali",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Perau Apotheke",
+    "category": "Medicinali",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Piumedical",
+    "category": "Medicinali",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Rossmann",
+    "category": "Medicinali",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Amazon Prime",
+    "category": "PayPal + Abbonamenti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Anomaly",
+    "category": "PayPal + Abbonamenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Fastweb",
+    "category": "PayPal + Abbonamenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Google One",
+    "category": "PayPal + Abbonamenti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "ORF",
+    "category": "PayPal + Abbonamenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "PayPal",
+    "category": "PayPal + Abbonamenti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Apple",
+    "category": "Reddito aggiuntivo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Prime All Country World USD (Acc)",
+    "category": "Reddito aggiuntivo",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "TR Benefits Saveback",
+    "category": "Reddito aggiuntivo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "TR Interest Payment",
+    "category": "Reddito aggiuntivo",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "1859",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "ADL",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Amazon",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Avolta",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Bellabologna",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "BIPA",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Bu.Co",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Cine Citta Fiera",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Cotton&Silk",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "CY Airports Duty Free",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "DM",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Giunti",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "GoFundMe",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Gruppo Negozzi",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "H&M",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Henry Shop",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "J Tech",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Laboratorio Le Arti",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Maxandra",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "New Yorker",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Nikolaigasse",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "OGGI",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Oriente",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Svapoweb",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Thalia",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "The Barber Shop",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Tigota",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "TK Maxx",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Valcanale",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Woolworth",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "XXXLutz",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Yamamay",
+    "category": "Spese Straordinarie",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Infineon",
+    "category": "Stipendio",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "ADS",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Carini",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "CM103",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Comune Di Atripalda",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Ge-Co Park",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Norauto",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "OeBB Ticket",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "P01",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Parcheggio",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "PSA Besucher",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Ronchi Park",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Silbersee Ranch",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "TMB",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Wiener Linien",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Wrstelstand",
+    "category": "Trasporti",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Avellino Basket",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Baia D'Oro",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Caorle Palace",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Casa Batllo",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Hotel",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Hotel Piccolo Paradiso",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Kaernten Therme",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "La Pedrera",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Leonardo Vienna",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "LNP Servizi",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Museu Picasso",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "NH Sants Barcelona",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "P.N.C. Di Venezian",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Park Guell",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Tremiti Online",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  },
+  {
+    "merchant": "Vivaticket",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.9
+  },
+  {
+    "merchant": "Wizz Air",
+    "category": "Viaggi, Divertimento",
+    "source": "seeded",
+    "confidence": 0.6
+  }
+]

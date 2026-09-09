@@ -3,10 +3,30 @@
 import sqlite3
 import shutil
 import os
+import json
 from datetime import datetime
 import pandas as pd
+from pydantic import BaseModel, ConfigDict
 
-DB_PATH = "budget.db"
+from agents.merchant_utils import normalize_merchant
+
+# Percorsi assoluti: il DB, il seed e il CSV devono restare accanto a questo
+# modulo, indipendentemente dalla directory da cui viene lanciata l'app.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "budget.db")
+SEED_PATH = os.path.join(BASE_DIR, "merchant_seed.json")
+DEFAULT_CSV_PATH = os.path.join(BASE_DIR, "budget_database.csv")
+
+
+def _resolve_csv_path(csv_path):
+    """Risolve un percorso CSV relativo contro BASE_DIR (export/migrate).
+
+    Così ``export_to_csv``/``migrate_from_csv`` scrivono/leggono sempre in
+    Budget_App anche se il processo è avviato da un'altra directory.
+    """
+    if os.path.isabs(csv_path):
+        return csv_path
+    return os.path.join(BASE_DIR, csv_path)
 
 BASE_COLUMNS = [
     "Year",
@@ -65,6 +85,37 @@ CREATE TABLE IF NOT EXISTS budget_targets (
 );
 """
 
+SCHEMA_MERCHANT_CATEGORIES = """
+CREATE TABLE IF NOT EXISTS merchant_categories (
+    merchant_normalized TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'llm',
+    confidence REAL DEFAULT 0.8,
+    times_seen INTEGER DEFAULT 1,
+    first_seen TEXT,
+    last_seen TEXT
+);
+"""
+
+
+class MerchantEntry(BaseModel):
+    """Voce della mappatura negozio -> categoria.
+
+    Modello congelato (frozen): una volta creata, la voce non può essere
+    mutata accidentalmente. Questo protegge in particolare le correzioni
+    manuali (source='manual'), che hanno priorità assoluta.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    merchant: str
+    category: str
+    source: str
+    confidence: float
+    times_seen: int
+    first_seen: str | None = None
+    last_seen: str | None = None
+
 
 def get_connection() -> sqlite3.Connection:
     """Return connection with WAL mode and foreign keys enabled."""
@@ -76,13 +127,23 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    """Create tables if not exists. Called on app startup."""
+    """Create tables if not exists. Called on app startup.
+
+    Ritorna il numero di voci seed importate automaticamente (0 se la tabella
+    era già popolata o il file seed è assente). L'import è idempotente e non
+    sovrascrive mai voci esistenti/manuali.
+    """
     conn = get_connection()
     conn.execute(SCHEMA_MONTHLY_BUDGET)
     conn.execute(SCHEMA_TRANSACTIONS)
     conn.execute(SCHEMA_BUDGET_TARGETS)
+    conn.execute(SCHEMA_MERCHANT_CATEGORIES)
     conn.commit()
     conn.close()
+
+    # Seed automatico: se la mappatura è vuota e merchant_seed.json esiste
+    # accanto a questo modulo, la importa una tantum.
+    return seed_merchants_from_json(SEED_PATH)
 
 
 def _backup_db():
@@ -91,7 +152,7 @@ def _backup_db():
         shutil.copy2(DB_PATH, DB_PATH + ".bak")
 
 
-def migrate_from_csv(csv_path="budget_database.csv", force=False):
+def migrate_from_csv(csv_path=DEFAULT_CSV_PATH, force=False):
     """One-time migration: read CSV, insert rows into monthly_budget.
 
     Args:
@@ -99,6 +160,7 @@ def migrate_from_csv(csv_path="budget_database.csv", force=False):
         force: If True, delete all existing data and re-import regardless.
                If False, skip if monthly_budget already has data.
     """
+    csv_path = _resolve_csv_path(csv_path)
     if not os.path.exists(csv_path):
         return
 
@@ -194,8 +256,9 @@ def save_data(df):
         pass
 
 
-def export_to_csv(filepath="budget_database.csv"):
+def export_to_csv(filepath=DEFAULT_CSV_PATH):
     """Export current DB to CSV (for backward compatibility / cloud sync)."""
+    filepath = _resolve_csv_path(filepath)
     conn = get_connection()
     cols_quoted = ", ".join([f'"{c}"' for c in BASE_COLUMNS])
     df = pd.read_sql_query(
@@ -330,3 +393,212 @@ def get_db_info() -> dict:
     conn.close()
 
     return info
+
+
+# ---------------------------------------------------------------------------
+# Mappatura negozi -> categorie (merchant_categories)
+# ---------------------------------------------------------------------------
+def _ensure_merchant_table(conn):
+    """Create merchant_categories table if missing (idempotent)."""
+    conn.execute(SCHEMA_MERCHANT_CATEGORIES)
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def get_merchant_map() -> dict[str, MerchantEntry]:
+    """Ritorna l'intera mappatura {merchant_normalized: MerchantEntry}.
+
+    Non crea la tabella: se non esiste ritorna un dict vuoto (l'import userà
+    l'LLM per tutto). Usata anche dal flusso di import come lookup.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT merchant_normalized, category, source, confidence, "
+            "times_seen, first_seen, last_seen FROM merchant_categories"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
+    conn.close()
+    return {
+        r["merchant_normalized"]: MerchantEntry(
+            merchant=r["merchant_normalized"],
+            category=r["category"],
+            source=r["source"],
+            confidence=r["confidence"],
+            times_seen=r["times_seen"],
+            first_seen=r["first_seen"],
+            last_seen=r["last_seen"],
+        )
+        for r in rows
+    }
+
+
+def get_merchant_list() -> list[MerchantEntry]:
+    """Ritorna le voci della mappatura come lista (per la UI), ordinate."""
+    return sorted(get_merchant_map().values(), key=lambda e: e.merchant)
+
+
+def get_merchant_count() -> int:
+    """Numero di voci presenti nella mappatura (0 se la tabella non esiste)."""
+    conn = get_connection()
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM merchant_categories"
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        conn.close()
+        return 0
+    conn.close()
+    return count
+
+
+def upsert_merchant(merchant, category, source="llm", confidence=0.8) -> bool:
+    """Inserisce/aggiorna una mappatura negozio -> categoria.
+
+    NON sovrascrive MAI una voce manuale: se la entry esistente ha
+    source='manual', l'upsert viene ignorato (priorità assoluta alla
+    correzione manuale). Per voci non-manual: incrementa times_seen, aggiorna
+    last_seen, e aggiorna category/source/confidence.
+
+    Ritorna False se ignorato (entry manuale esistente), True altrimenti.
+    """
+    key = normalize_merchant(merchant)
+    if not key:
+        return False
+
+    now = _now_iso()
+    conn = get_connection()
+    try:
+        _ensure_merchant_table(conn)
+        existing = conn.execute(
+            "SELECT source FROM merchant_categories WHERE merchant_normalized = ?",
+            (key,),
+        ).fetchone()
+        if existing is not None and existing["source"] == "manual":
+            return False
+
+        conn.execute(
+            """
+            INSERT INTO merchant_categories
+                (merchant_normalized, category, source, confidence,
+                 times_seen, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(merchant_normalized) DO UPDATE SET
+                category = excluded.category,
+                source = excluded.source,
+                confidence = excluded.confidence,
+                times_seen = merchant_categories.times_seen + 1,
+                last_seen = excluded.last_seen
+            WHERE merchant_categories.source != 'manual'
+            """,
+            (key, str(category), source, float(confidence), now, now),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def set_merchant_manual(merchant, category) -> bool:
+    """Imposta (o sovrascrive) una correzione manuale: source='manual',
+    confidence=1.0. Priorità assoluta: nessun upsert LLM/seed la toccherà."""
+    key = normalize_merchant(merchant)
+    if not key:
+        return False
+
+    now = _now_iso()
+    conn = get_connection()
+    try:
+        _ensure_merchant_table(conn)
+        conn.execute(
+            """
+            INSERT INTO merchant_categories
+                (merchant_normalized, category, source, confidence,
+                 times_seen, first_seen, last_seen)
+            VALUES (?, ?, 'manual', 1.0, 1, ?, ?)
+            ON CONFLICT(merchant_normalized) DO UPDATE SET
+                category = excluded.category,
+                source = 'manual',
+                confidence = 1.0,
+                times_seen = merchant_categories.times_seen + 1,
+                last_seen = excluded.last_seen
+            """,
+            (key, str(category), now, now),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def delete_merchant(merchant) -> bool:
+    """Elimina una voce dalla mappatura. Ritorna True se eliminata."""
+    key = normalize_merchant(merchant)
+    if not key:
+        return False
+
+    conn = get_connection()
+    try:
+        _ensure_merchant_table(conn)
+        cursor = conn.execute(
+            "DELETE FROM merchant_categories WHERE merchant_normalized = ?",
+            (key,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def seed_merchants_from_json(path) -> int:
+    """Carica il seed negozi->categoria UNA TANTUM.
+
+    Carica solo se la tabella è vuota (comportamento sicuro e idempotente).
+    Le chiavi vengono normalizzate con normalize_merchant così da restare
+    coerenti con il lookup dell'import. Non sovrascrive mai voci manuali
+    (difensivo). Ritorna il numero di voci inserite.
+    """
+    if not os.path.isabs(path):
+        path = os.path.join(BASE_DIR, path)
+    if not os.path.exists(path):
+        return 0
+
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    conn = get_connection()
+    try:
+        _ensure_merchant_table(conn)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM merchant_categories"
+        ).fetchone()[0]
+        if count > 0:
+            return 0
+
+        now = _now_iso()
+        inserted = 0
+        for entry in data:
+            merchant = normalize_merchant(entry.get("merchant", ""))
+            category = str(entry.get("category", "") or "")
+            source = str(entry.get("source", "seeded") or "seeded")
+            confidence = float(entry.get("confidence", 0.6))
+            if not merchant or not category:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO merchant_categories
+                    (merchant_normalized, category, source, confidence,
+                     times_seen, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                """,
+                (merchant, category, source, confidence, now, now),
+            )
+            inserted += 1
+        conn.commit()
+        return inserted
+    finally:
+        conn.close()
