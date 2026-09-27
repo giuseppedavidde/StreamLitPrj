@@ -1890,6 +1890,30 @@ def main():
                     "Carica File Banca", type=["csv", "pdf"], key="bank_uploader"
                 )
 
+                _mode_options = {
+                    "🔀 Ibrida (negozi + AI)": "hybrid",
+                    "🧠 Solo AI (forza LLM su tutte)": "llm_only",
+                }
+                if hasattr(st, "segmented_control"):
+                    _mode_label = st.segmented_control(
+                        "Modalità di classificazione",
+                        options=list(_mode_options.keys()),
+                        default=list(_mode_options.keys())[0],
+                        key="classify_mode_selector",
+                    )
+                else:
+                    _mode_label = st.radio(
+                        "Modalità di classificazione",
+                        options=list(_mode_options.keys()),
+                        index=0,
+                        key="classify_mode_selector",
+                    )
+                classify_mode = _mode_options.get(_mode_label, "hybrid")
+                st.caption(
+                    "Solo AI utile per test/misura: più lenta, non usa la "
+                    "mappatura negozi già appresa."
+                )
+
                 if uploaded_bank_file is not None and BankImporter:
                     has_ai = (
                         "ai_provider" in st.session_state
@@ -1925,6 +1949,7 @@ def main():
                                     target_cats,
                                     income_cols,
                                     progress_callback=update_progress,
+                                    classify_mode=classify_mode,
                                 )
 
                                 st.session_state["import_results"] = results
