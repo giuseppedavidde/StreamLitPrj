@@ -39,6 +39,11 @@ except ImportError:
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "budget_database.csv")
 
+# Placeholder mostrato nella review per le righe che né l'AI né le scorciatoie
+# deterministiche hanno categorizzato. NON è una categoria valida e non viene
+# MAI salvata nel database (solo valore di visualizzazione nella tabella).
+UNCLASSIFIED_PLACEHOLDER = "❓ Da classificare"
+
 import db
 
 
@@ -836,7 +841,9 @@ def _apply_review_edits(detailed_df, edited, target_cats):
     """
     for i, orig_idx in enumerate(detailed_df.index):
         new_cat = edited.iloc[i]["Categoria AI"]
-        if new_cat and new_cat in target_cats:
+        # Il placeholder "❓ Da classificare" non è una categoria: viene
+        # ignorato (la riga resta non categorizzata) e non finisce nel DB.
+        if new_cat and new_cat != UNCLASSIFIED_PLACEHOLDER and new_cat in target_cats:
             detailed_df.at[orig_idx, "New_Category"] = new_cat
 
     rows_to_delete = edited[edited["🗑️ Elimina"] == True].index.tolist()
@@ -845,6 +852,15 @@ def _apply_review_edits(detailed_df, edited, target_cats):
         detailed_df = detailed_df.drop(orig_indices_to_drop)
 
     return detailed_df, len(rows_to_delete)
+
+
+def _review_display_category(cat, review_cats):
+    """Mappa una categoria della review in un valore valido per la Selectbox.
+
+    Le righe non classificate (categoria assente/non tra ``review_cats``) sono
+    mostrate come ``UNCLASSIFIED_PLACEHOLDER`` invece che come cella vuota.
+    """
+    return cat if cat in review_cats else UNCLASSIFIED_PLACEHOLDER
 
 
 def main():
@@ -910,6 +926,30 @@ def main():
                             st.session_state.pop("_ai_config_key", None)
                             st.session_state.pop("opencode_agent", None)
                             st.session_state.pop("ai_provider", None)
+
+            # --- Switch ESPLICITO modalità di classificazione (prominente) ---
+            st.divider()
+            st.markdown("**🧭 Modalità classificazione AI**")
+            _classify_mode_options = {
+                "🔀 Ibrida (negozi + AI)": "hybrid",
+                "🧠 Solo AI (forza LLM su tutte)": "llm_only",
+            }
+            _classify_mode_label = st.radio(
+                "Modalità classificazione AI",
+                options=list(_classify_mode_options.keys()),
+                index=0,
+                key="classify_mode_radio",
+                help=(
+                    "Ibrida: usa la mappatura negozi già appresa e invia all'AI "
+                    "solo il residuo (più veloce/economica). Solo AI: bypassa le "
+                    "scorciatoie deterministiche e forza il modello su TUTTE le "
+                    "transazioni (utile per test/misura)."
+                ),
+                label_visibility="collapsed",
+            )
+            st.session_state["classify_mode"] = _classify_mode_options.get(
+                _classify_mode_label, "hybrid"
+            )
 
         # --- DATABASE STATUS (Sidebar — SEMPRE VISIBILE) ---
         st.sidebar.divider()
@@ -1890,28 +1930,17 @@ def main():
                     "Carica File Banca", type=["csv", "pdf"], key="bank_uploader"
                 )
 
-                _mode_options = {
-                    "🔀 Ibrida (negozi + AI)": "hybrid",
-                    "🧠 Solo AI (forza LLM su tutte)": "llm_only",
-                }
-                if hasattr(st, "segmented_control"):
-                    _mode_label = st.segmented_control(
-                        "Modalità di classificazione",
-                        options=list(_mode_options.keys()),
-                        default=list(_mode_options.keys())[0],
-                        key="classify_mode_selector",
-                    )
-                else:
-                    _mode_label = st.radio(
-                        "Modalità di classificazione",
-                        options=list(_mode_options.keys()),
-                        index=0,
-                        key="classify_mode_selector",
-                    )
-                classify_mode = _mode_options.get(_mode_label, "hybrid")
+                # Lo switch è UNICO e vive nella sidebar (🤖 AI Configuration)
+                # per evitare due controlli duplicati con la stessa key.
+                classify_mode = st.session_state.get("classify_mode", "hybrid")
+                _mode_label_display = (
+                    "🧠 Solo AI (forza LLM su tutte)"
+                    if classify_mode == "llm_only"
+                    else "🔀 Ibrida (negozi + AI)"
+                )
                 st.caption(
-                    "Solo AI utile per test/misura: più lenta, non usa la "
-                    "mappatura negozi già appresa."
+                    f"🧭 Modalità di classificazione attiva: **{_mode_label_display}**. "
+                    "Per cambiarla: sidebar → 🤖 AI Configuration."
                 )
 
                 if uploaded_bank_file is not None and BankImporter:
@@ -1969,6 +1998,28 @@ def main():
                     report_md = results.get("report_md", "")
                     agg_df = results["aggregated_df"]
 
+                    # --- Diagnostica AI (non più fallimenti silenziosi) ---
+                    ai_stats = results.get("ai_stats") or {}
+                    _stats_mode = ai_stats.get("mode", "hybrid")
+                    _stats_mode_disp = (
+                        "🧠 Solo AI" if _stats_mode == "llm_only" else "🔀 Ibrida"
+                    )
+                    _sent = ai_stats.get("llm_sent", 0)
+                    _mapped = ai_stats.get("llm_mapped", 0)
+                    _failed = ai_stats.get("llm_failed", 0)
+                    _errors = ai_stats.get("errors") or []
+                    st.info(
+                        f"🤖 Categorizzazione (modalità {_stats_mode_disp}) — "
+                        f"**{_sent}** inviate all'AI, **{_mapped}** categorizzate, "
+                        f"**{_failed}** non categorizzate."
+                    )
+                    if _failed > 0 or _errors:
+                        _err_txt = " | ".join(str(e) for e in _errors) or "errore sconosciuto"
+                        st.warning(
+                            f"⚠️ **{_failed}** transazioni non categorizzate dall'AI. "
+                            f"Dettaglio errori: {_err_txt}"
+                        )
+
                     # Snapshot della proposta AI (per rilevare le correzioni
                     # manuali al momento del salvataggio — F5).
                     if "Ai_Proposed" not in detailed_df.columns:
@@ -1980,9 +2031,19 @@ def main():
                     # Categorie valide per la review: target + 'Escluso' (opzione
                     # valida della Selectbox per i trasferimenti/righe escluse).
                     review_cats = sorted(set(target_cats) | {"Escluso"})
+                    # Opzioni della Selectbox: valide + placeholder esplicito.
+                    # Così le righe NON classificate si VEDONO (non più celle
+                    # vuote ingannevoli) e l'utente sa che deve scegliere.
+                    review_options = review_cats + [UNCLASSIFIED_PLACEHOLDER]
 
                     edit_df = detailed_df[["Std_Date", "Std_Description", "Betrag_Float", "Analyzed_Category", "New_Category"]].copy()
                     edit_df.columns = ["Data", "Descrizione", "Importo €", "Categoria Originale", "Categoria AI"]
+                    # Sostituisci i valori non validi (es. "Unkategorisiert",
+                    # NaN) con il placeholder esplicito.
+                    edit_df["Categoria AI"] = [
+                        _review_display_category(cat, review_cats)
+                        for cat in detailed_df["New_Category"]
+                    ]
                     edit_df["🗑️ Elimina"] = False
                     edit_df["Descrizione"] = edit_df["Descrizione"].astype(str).str[:50]
 
@@ -1995,7 +2056,7 @@ def main():
                             "Categoria Originale": st.column_config.TextColumn("📁 Originale", disabled=True),
                             "Categoria AI": st.column_config.SelectboxColumn(
                                 "🏷️ Categoria AI",
-                                options=review_cats,
+                                options=review_options,
                                 required=True,
                                 width="medium",
                             ),
