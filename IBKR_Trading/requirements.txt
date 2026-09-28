@@ -10,5 +10,5 @@ python-dotenv
 groq
 watchdog
 # Install the local Custom_Agents package in editable mode
-#git+https://github.com/giuseppedavidde/Custom_Agents.git#egg=custom_agents
--e ../../Custom_Agents
+git+https://github.com/giuseppedavidde/Custom_Agents.git#egg=custom_agents
+#-e ../../Custom_Agents
