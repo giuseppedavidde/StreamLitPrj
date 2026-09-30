@@ -22,11 +22,20 @@ try:
     from agents.cloud_manager import CloudManager
     from agents.bank_importer import BankImporter
     from agents.opencode_agent import OpencodeAgent, OpencodeConfig
+    from agents.merchant_utils import merchant_keys
 except ImportError as e:
     AIProvider = None
     CloudManager = None
     BankImporter = None
     OpencodeAgent = None
+
+    def merchant_keys(std_name, desc):
+        """Fallback locale (agents non importabile): normalizza via ``db``."""
+        keys = []
+        for candidate in (db.normalize_merchant(std_name), db.normalize_merchant(desc)):
+            if candidate and candidate not in keys:
+                keys.append(candidate)
+        return keys
 
 try:
     from agents.cloud_ui import render_cloud_sync_ui
@@ -852,6 +861,40 @@ def _apply_review_edits(detailed_df, edited, target_cats):
         detailed_df = detailed_df.drop(orig_indices_to_drop)
 
     return detailed_df, len(rows_to_delete)
+
+
+def _learn_manual_corrections(detailed_df):
+    """Apprende le correzioni manuali dell'utente e le memorizza nel DB.
+
+    Per ogni riga la cui categoria finale differisce dalla proposta AI, salva
+    TUTTE le chiavi candidate del merchant (nome pulito + descrizione, vedi
+    ``merchant_keys``) come ``source='manual'``. Al prossimo import la stessa
+    transazione viene così classificata correttamente senza chiamare l'LLM,
+    indipendentemente da quale chiave usi la lookup.
+
+    Idempotente: l'ultimo valore salvato vince (``set_merchant_manual`` fa
+    upsert). Ritorna la lista ``[(merchant, categoria), ...]`` appresa.
+    """
+    learned = []
+    for _, row in detailed_df.iterrows():
+        proposed = row.get("Ai_Proposed", "")
+        final_cat = row.get("New_Category", "")
+        if not final_cat or final_cat == proposed:
+            continue
+        keys = merchant_keys(row.get("Std_Name", ""), row.get("Std_Description", ""))
+        for key in keys:
+            db.set_merchant_manual(key, final_cat)
+        if keys:
+            learned.append((keys[0], final_cat))
+    return learned
+
+
+def _learning_feedback(learned):
+    """Riepilogo leggibile (N correzioni + un paio di esempi merchant→cat)."""
+    if not learned:
+        return ""
+    examples = ", ".join(f"{merchant} → {category}" for merchant, category in learned[:2])
+    return f" 🧠 {len(learned)} correzioni apprese ({examples})."
 
 
 def _review_display_category(cat, review_cats):
@@ -2073,6 +2116,7 @@ def main():
                         detailed_df, n_deleted = _apply_review_edits(
                             detailed_df, edited, review_cats
                         )
+                        learned = _learn_manual_corrections(detailed_df)
 
                         dummy_importer = BankImporter(None)
                         new_agg = dummy_importer.aggregate_data(
@@ -2087,6 +2131,7 @@ def main():
                         msg = "Categorie aggiornate!"
                         if n_deleted > 0:
                             msg += f" {n_deleted} righe eliminate."
+                        msg += _learning_feedback(learned)
                         st.toast(msg, icon="✅")
                         time.sleep(0.5)
                         st.rerun()
@@ -2106,13 +2151,11 @@ def main():
                             # F5: memorizza le correzioni manuali dell'utente.
                             # Solo le categorie modificate esplicitamente diventano
                             # source='manual' (confidence 1.0); le proposte AI
-                            # lasciate invariate restano llm/seed.
-                            for _, row in detailed_df.iterrows():
-                                proposed = row.get("Ai_Proposed", "")
-                                final_cat = row.get("New_Category", "")
-                                desc = row.get("Std_Description", "")
-                                if final_cat and final_cat != proposed:
-                                    db.set_merchant_manual(desc, final_cat)
+                            # lasciate invariate restano llm/seed. L'apprendimento
+                            # salva TUTTE le chiavi candidate del merchant (nome
+                            # pulito + descrizione) così il prossimo import la
+                            # ritrova senza chiamare l'LLM.
+                            learned = _learn_manual_corrections(detailed_df)
 
                             # Ricomputa l'aggregato con le modifiche applicate.
                             dummy_importer = BankImporter(None)
@@ -2162,6 +2205,7 @@ def main():
 
                             st.success(
                                 "Importazione completata con successo! I dati sono stati salvati."
+                                + _learning_feedback(learned)
                             )
 
                             del st.session_state["import_results"]
