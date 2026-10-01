@@ -55,6 +55,12 @@ UNCLASSIFIED_PLACEHOLDER = "❓ Da classificare"
 
 import db
 
+# Categorie di spesa in conto capitale (beni durevoli). Sono ESCLUSE dalle
+# metriche di spesa ricorrente (Totale Uscite, trend, run-rate, forecast,
+# Risparmio %) ma INCLUSE nel flusso di cassa netto e quindi nel Patrimonio,
+# perché l'uscita di cassa è reale.
+CAPEX_CATS = ["Acquisto Auto"]
+
 
 # --- Data Models (Pydantic) ---
 class ForecastPoint(BaseModel):
@@ -89,6 +95,9 @@ def calculate_metrics(df):
         "Risparmio %",
         "Totale Entrate",
         "Totale Uscite",
+        "Totale Capex",
+        "Totale Spese Vista",
+        "Flusso di cassa netto",
     ]
 
     # Definisci esplicitamente le entrate (evita match parziali errati)
@@ -102,12 +111,21 @@ def calculate_metrics(df):
         c for c in cols if c not in income_cols and c not in excluded_from_sum
     ]
 
+    # Il CAPEX (es. Acquisto Auto) è spesa in conto capitale: escluso dalle
+    # spese ricorrenti, tracciato a parte e incluso nel flusso di cassa.
+    capex_cols = [c for c in cols if c in CAPEX_CATS]
+    expense_cols = [c for c in expense_cols if c not in capex_cols]
+
     # Calcolo Totali
     df["Totale Entrate"] = df[income_cols].sum(axis=1)
     df["Totale Uscite"] = df[expense_cols].sum(axis=1)
+    df["Totale Capex"] = df[capex_cols].sum(axis=1) if capex_cols else 0.0
 
     # Ricalcolo colonne derivate (sovrascrive quelle del CSV per coerenza)
     df["Reddito meno spese"] = df["Totale Entrate"] - df["Totale Uscite"]
+    df["Flusso di cassa netto"] = (
+        df["Totale Entrate"] - df["Totale Uscite"] - df["Totale Capex"]
+    )
 
     # Gestione divisione per zero (vettorializzato)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -123,6 +141,11 @@ def calculate_metrics(df):
 def prepare_timeseries(df):
     """Prepara la serie temporale: DateObj, sort asc, Patrimonio e Investimenti cumulativi.
 
+    Il ``Patrimonio`` è il cumulato del ``Flusso di cassa netto``
+    (Entrate - Uscite ricorrenti - Capex): include quindi gli acquisti in
+    conto capitale, che non sono spese ricorrenti ma sono uscite di cassa
+    reali. Fallback su ``Reddito meno spese`` se il flusso non è disponibile.
+
     Restituisce (df_sorted_asc, df_desc).
     """
     df = df.copy()
@@ -132,7 +155,12 @@ def prepare_timeseries(df):
     df["DateObj"] = pd.to_datetime(df["DateStr"])
     # Ordiniamo dal passato al presente per calcolo cumulativo corretto
     df_sorted_asc = df.sort_values("DateObj", ascending=True)
-    df_sorted_asc["Patrimonio"] = df_sorted_asc["Reddito meno spese"].cumsum()
+    cash_flow_col = (
+        "Flusso di cassa netto"
+        if "Flusso di cassa netto" in df_sorted_asc.columns
+        else "Reddito meno spese"
+    )
+    df_sorted_asc["Patrimonio"] = df_sorted_asc[cash_flow_col].cumsum()
 
     # Calcolo Cumulativo Investimenti
     if "Investimenti" in df_sorted_asc.columns:
@@ -146,20 +174,37 @@ def prepare_timeseries(df):
     return df_sorted_asc, df_desc
 
 
-def apply_optional_expense_filter(df, expense_cols, disabled_cats):
+def apply_optional_expense_filter(
+    df, expense_cols, disabled_cats, include_capex_view=False
+):
     """Ricalcola i totali escludendo le categorie di spesa opzionali.
 
     Le categorie in ``disabled_cats`` vengono rimosse dall'insieme ``expense_cols``
     usato per ``Totale Uscite``, ``Reddito meno spese`` e ``Risparmio %``. Il
-    ``Patrimonio`` (cumsum di Reddito meno spese) viene ricalcolato a valle in
+    ``Patrimonio`` (cumsum di Flusso di cassa netto) viene ricalcolato a valle in
     ``prepare_timeseries``; ``Investimenti_Cumulativo`` resta invariato (cumulo
-    degli investimenti, indipendente dal filtro). Ritorna (df, active_expense_cols).
+    degli investimenti, indipendente dal filtro).
+
+    Il CAPEX non entra MAI in ``Flusso di cassa netto``/``Patrimonio`` o nelle
+    spese ricorrenti: è sempre sottratto a parte. Con ``include_capex_view=True``
+    viene aggiunto solo alla colonna di visualizzazione ``Totale Spese Vista``
+    (mai usata per il flusso/Patrimonio). Ritorna (df, active_expense_cols).
     """
     active_expense_cols = [c for c in expense_cols if c not in disabled_cats]
+    capex_cols = [c for c in df.columns if c in CAPEX_CATS]
 
     df = df.copy()
     df["Totale Uscite"] = df[active_expense_cols].sum(axis=1)
+    df["Totale Capex"] = df[capex_cols].sum(axis=1) if capex_cols else 0.0
     df["Reddito meno spese"] = df["Totale Entrate"] - df["Totale Uscite"]
+    df["Flusso di cassa netto"] = (
+        df["Totale Entrate"] - df["Totale Uscite"] - df["Totale Capex"]
+    )
+    df["Totale Spese Vista"] = (
+        df["Totale Uscite"] + df["Totale Capex"]
+        if include_capex_view
+        else df["Totale Uscite"]
+    )
 
     with np.errstate(divide="ignore", invalid="ignore"):
         df["Risparmio %"] = np.where(
@@ -922,6 +967,7 @@ def main():
 
     if not df.empty:
         df, expense_cols, income_cols = calculate_metrics(df)
+        capex_cols = [c for c in df.columns if c in CAPEX_CATS]
 
         # Sidebar per navigazione
         page = st.sidebar.radio(
@@ -1030,7 +1076,7 @@ def main():
             # --- 0b. FILTRO SPESE OPZIONALI (solo vista, nessuna modifica ai dati) ---
             with st.container(border=True):
                 st.caption("Filtro spese (vista)")
-                ft1, ft2 = st.columns(2)
+                ft1, ft2, ft3 = st.columns(3)
                 incl_investimenti = ft1.toggle(
                     "💼 Includi Investimenti nelle spese",
                     value=True,
@@ -1041,6 +1087,11 @@ def main():
                     value=True,
                     key="incl_straordinarie",
                 )
+                incl_capex = ft3.toggle(
+                    "🚗 Includi Acquisto Auto nelle spese",
+                    value=False,
+                    key="incl_capex",
+                )
 
             disabled_cats = []
             if not incl_investimenti:
@@ -1049,7 +1100,7 @@ def main():
                 disabled_cats.append("Spese Straordinarie")
 
             df, active_expense_cols = apply_optional_expense_filter(
-                df, expense_cols, disabled_cats
+                df, expense_cols, disabled_cats, include_capex_view=incl_capex
             )
 
             # --- 0. PREPARAZIONE DATI GLOBALE ---
@@ -1444,17 +1495,28 @@ def main():
 
             with col_kpi:
                 with st.container(border=True):
-                    c1, c2 = st.columns(2)
+                    c1, c2, c3 = st.columns(3)
                     c1.metric(
                         "Entrate Totali",
                         f"€ {selected_row['Totale Entrate']:,.2f}",
                         delta="Incassato",
                     )
+                    uscite_vista = (
+                        selected_row["Totale Spese Vista"]
+                        if incl_capex
+                        else selected_row["Totale Uscite"]
+                    )
                     c2.metric(
                         "Uscite Totali",
-                        f"€ {selected_row['Totale Uscite']:,.2f}",
+                        f"€ {uscite_vista:,.2f}",
                         delta="- Speso",
                         delta_color="inverse",
+                    )
+                    c3.metric(
+                        "Spese in conto capitale (capex)",
+                        f"€ {selected_row.get('Totale Capex', 0.0):,.2f}",
+                        delta="CAPEX",
+                        delta_color="off",
                     )
 
                 st.write("")
@@ -1934,7 +1996,9 @@ def main():
                 "Modifica i valori direttamente nella tabella qui sotto. Le colonne dei Totali sono calcolate automaticamente."
             )
 
-            editable_cols = ["Year", "MonthNum", "Month"] + income_cols + expense_cols
+            editable_cols = (
+                ["Year", "MonthNum", "Month"] + income_cols + expense_cols + capex_cols
+            )
 
             edited_df = st.data_editor(
                 df[editable_cols],
@@ -2011,7 +2075,7 @@ def main():
                                     importer = BankImporter(
                                         ai_provider=st.session_state["ai_provider"]
                                     )
-                                target_cats = income_cols + expense_cols
+                                target_cats = income_cols + expense_cols + capex_cols
 
                                 def update_progress(p, msg):
                                     progress_bar.progress(p, text=msg)
@@ -2070,7 +2134,7 @@ def main():
 
                     st.subheader("🔍 Revisione Categorizzazione")
 
-                    target_cats = sorted(income_cols + expense_cols)
+                    target_cats = sorted(income_cols + expense_cols + capex_cols)
                     # Categorie valide per la review: target + 'Escluso' (opzione
                     # valida della Selectbox per i trasferimenti/righe escluse).
                     review_cats = sorted(set(target_cats) | {"Escluso"})
@@ -2397,7 +2461,7 @@ def main():
                 st.subheader("Uscite (Aggiungi)")
                 new_expenses = {}
                 cols = st.columns(3)
-                for i, col_name in enumerate(expense_cols):
+                for i, col_name in enumerate(expense_cols + capex_cols):
                     curr_label = ""
                     if is_existing:
                         curr_val = existing_row[col_name]
@@ -2434,7 +2498,10 @@ def main():
                         new_row.update(new_expenses)
 
                         base_df = df[
-                            ["Year", "MonthNum", "Month"] + income_cols + expense_cols
+                            ["Year", "MonthNum", "Month"]
+                            + income_cols
+                            + expense_cols
+                            + capex_cols
                         ]
                         new_df = pd.DataFrame([new_row])
                         updated_df = pd.concat([new_df, base_df], ignore_index=True)

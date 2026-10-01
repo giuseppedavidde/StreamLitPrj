@@ -37,7 +37,4 @@ agents/*
 *.csv
 
 # SQLite database
-budget.db
-budget.db.bak
-budget.db-wal
-budget.db-shm
+budget.db.bak*

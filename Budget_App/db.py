@@ -43,6 +43,7 @@ BASE_COLUMNS = [
     "Medicinali",
     "PayPal + Abbonamenti",
     "Spese Straordinarie",
+    "Acquisto Auto",
     "Trasporti",
     "Viaggi, Divertimento",
 ]
@@ -126,6 +127,21 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_monthly_budget_columns(conn):
+    """Aggiunge le colonne di ``BASE_COLUMNS`` mancanti (ALTER idempotente).
+
+    Serve a migrare i DB creati prima dell'introduzione di nuove colonne
+    (es. "Acquisto Auto"): ``CREATE TABLE IF NOT EXISTS`` non altera le
+    tabelle esistenti, quindi la colonna va aggiunta esplicitamente.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(monthly_budget)")}
+    for col in BASE_COLUMNS:
+        if col not in existing:
+            conn.execute(
+                f'ALTER TABLE monthly_budget ADD COLUMN "{col}" REAL DEFAULT 0.0'
+            )
+
+
 def init_db():
     """Create tables if not exists. Called on app startup.
 
@@ -138,6 +154,7 @@ def init_db():
     conn.execute(SCHEMA_TRANSACTIONS)
     conn.execute(SCHEMA_BUDGET_TARGETS)
     conn.execute(SCHEMA_MERCHANT_CATEGORIES)
+    _ensure_monthly_budget_columns(conn)
     conn.commit()
     conn.close()
 
