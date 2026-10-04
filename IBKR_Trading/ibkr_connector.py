@@ -31,6 +31,7 @@ from ib_async import (
     Option,
     Contract,
     ComboLeg,
+    ExecutionFilter,
     LimitOrder,
     MarketOrder,
     util,
@@ -876,6 +877,94 @@ class IBKRConnector:
             positions.append(pos)
 
         return positions
+
+    def get_executions(self, account: str = "") -> list[dict]:
+        """Fetch executed trades (fills) from IBKR.
+
+        Combines the server-side execution history returned by
+        ``reqExecutions`` with the fills already collected by ib_async during
+        the current session, then normalises every execution into a flat dict
+        suitable for tabular display and CSV/Excel export. Results are
+        de-duplicated by execution id and sorted by execution time (most
+        recent first).
+
+        Note:
+            IBKR's ``reqExecutions`` only serves executions for the **current
+            trading day** (IB docs: "Only the current day's executions can be
+            retrieved"). For multi-day history use the Flex Web Service
+            (``ibkr_flex.py``). The anonymous-blocking ``reqExecutions`` call
+            waits for the ``execDetailsEnd`` callback internally, so the
+            returned list is complete for the request.
+
+        Args:
+            account: Optional account filter (e.g. 'DU123456'). Leave blank
+                     for all accounts.
+
+        Returns:
+            A list of normalised execution dicts.
+        """
+        if not self.is_ready():
+            raise ConnectionError("Not connected to IBKR.")
+
+        self._ensure_loop()
+
+        # clientId=0 is the IB convention for "all clients" (also manual TWS
+        # orders), which is what we want for a complete day's executions.
+        exec_filter = ExecutionFilter(acctCode=account, clientId=0)
+        requested = self.ib.reqExecutions(exec_filter)
+
+        fills: dict = {}
+        for fill in requested:
+            exec_id = fill.execution.execId
+            if exec_id:
+                fills[exec_id] = fill
+
+        # Merge session fills: covers fills pushed live while orders placed by
+        # this client were executing (and any reconnect cases).
+        for fill in self.ib.fills():
+            exec_id = fill.execution.execId
+            if exec_id:
+                fills.setdefault(exec_id, fill)
+
+        print(
+            f"[IBKR] get_executions: {len(requested)} from reqExecutions, "
+            f"{len(self.ib.fills())} session fills, {len(fills)} unique."
+        )
+
+        executions: list[dict] = []
+        for fill in fills.values():
+            contract = fill.contract
+            execution = fill.execution
+            comm = fill.commissionReport
+
+            if account and execution.acctNumber != account:
+                continue
+
+            expiry = getattr(contract, "lastTradeDateOrContractMonth", "") or ""
+            executions.append(
+                {
+                    "time": fill.time or execution.time,
+                    "exec_id": execution.execId,
+                    "symbol": contract.symbol,
+                    "sec_type": contract.secType,
+                    "currency": contract.currency,
+                    "expiry": expiry,
+                    "strike": float(getattr(contract, "strike", 0.0) or 0.0),
+                    "right": getattr(contract, "right", "") or "",
+                    "side": execution.side,
+                    "shares": float(execution.shares),
+                    "price": float(execution.price),
+                    "commission": float(getattr(comm, "commission", 0.0) or 0.0),
+                    "realized_pnl": float(
+                        getattr(comm, "realizedPNL", 0.0) or 0.0
+                    ),
+                    "exchange": execution.exchange,
+                    "account": execution.acctNumber,
+                }
+            )
+
+        executions.sort(key=lambda item: item["time"], reverse=True)
+        return executions
 
 
 if __name__ == "__main__":

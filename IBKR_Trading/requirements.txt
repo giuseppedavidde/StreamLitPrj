@@ -4,6 +4,8 @@ nest-asyncio2
 ta
 scipy
 plotly
+openpyxl
+requests
 yfinance
 lxml
 python-dotenv

@@ -3,8 +3,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import traceback
 import os
+import io
 import subprocess
 import shutil
+from datetime import date, datetime, timedelta
 
 from ibkr_connector import IBKRConnector
 from technical_analysis import add_indicators, detect_patterns, get_holders_info, get_financial_info
@@ -19,6 +21,40 @@ from option_utils import (
     compute_volume_profile_yfinance,
     compute_sentiment_yfinance,
 )
+
+try:
+    from ibkr_flex import FlexConfig, get_flex_executions, parse_flex_statement
+except Exception:  # requests/pydantic missing or module not deployed
+    FlexConfig = None
+    get_flex_executions = None
+    parse_flex_statement = None
+
+try:
+    from trade_stats import TradeStats, compute_trade_stats
+except Exception:  # pandas/pydantic missing or module not deployed
+    TradeStats = None
+    compute_trade_stats = None
+
+try:
+    from positions import (
+        apply_market_prices,
+        compute_open_positions,
+        fetch_market_prices,
+        total_unrealized_pnl,
+    )
+except Exception:  # pandas/pydantic missing or module not deployed
+    apply_market_prices = None
+    compute_open_positions = None
+    fetch_market_prices = None
+    total_unrealized_pnl = None
+
+try:
+    from trading_coach import CoachConfig, TradingCoach
+except Exception:  # requests/pydantic missing or module not deployed
+    CoachConfig = None
+    TradingCoach = None
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Load .env (GOOGLE_API_KEY etc.) before importing agents
 from dotenv import load_dotenv
@@ -347,6 +383,369 @@ def get_historical_data_with_fallback(connector, ticker, **kwargs):
             
     return df, data_source
 
+
+# ─── Trade History Helpers ──────────────────────────────────────────────────
+
+TRADE_HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "trade_history.csv"
+)
+
+TRADE_HISTORY_COLUMNS = [
+    "time", "exec_id", "symbol", "sec_type", "currency", "expiry", "strike",
+    "right", "side", "shares", "price", "commission", "realized_pnl",
+    "exchange", "account",
+]
+
+
+def _normalize_trade_times(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of the ledger with a timezone-naive ``time`` column."""
+    df = df.copy()
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(
+            df["time"], errors="coerce", utc=True
+        ).dt.tz_localize(None)
+    return df
+
+
+def _load_trade_history() -> pd.DataFrame:
+    """Load the locally accumulated execution ledger (empty on first run)."""
+    if not os.path.exists(TRADE_HISTORY_FILE):
+        return pd.DataFrame(columns=TRADE_HISTORY_COLUMNS)
+    try:
+        df = pd.read_csv(TRADE_HISTORY_FILE)
+    except Exception as e:
+        print(f"[TRADE HISTORY] Failed to read ledger: {e}")
+        return pd.DataFrame(columns=TRADE_HISTORY_COLUMNS)
+    return _normalize_trade_times(df)
+
+
+def _merge_trade_history(df_local: pd.DataFrame, records: list[dict]) -> pd.DataFrame:
+    """Merge freshly fetched executions into the ledger, de-duplicated by exec_id."""
+    if not records:
+        return _normalize_trade_times(df_local)
+    df_new = _normalize_trade_times(pd.DataFrame(records))
+    merged = pd.concat([df_local, df_new], ignore_index=True)
+    merged = _normalize_trade_times(merged)
+    if "exec_id" in merged.columns:
+        ids = merged["exec_id"].astype("string").fillna("").str.strip()
+        with_id = merged[ids != ""].drop_duplicates(subset="exec_id", keep="last")
+        without_id = merged[ids == ""]
+        merged = pd.concat([with_id, without_id], ignore_index=True)
+    merged = merged.sort_values("time", ascending=False).reset_index(drop=True)
+    return merged
+
+
+def _save_trade_history(df: pd.DataFrame) -> None:
+    """Persist the execution ledger to CSV so history accumulates across sessions."""
+    try:
+        out = _normalize_trade_times(df)
+        out.to_csv(TRADE_HISTORY_FILE, index=False)
+    except Exception as e:
+        print(f"[TRADE HISTORY] Failed to write ledger: {e}")
+
+
+def _filter_trade_history(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """Return executions whose timestamp falls within [start, end] (inclusive)."""
+    if df.empty or "time" not in df.columns:
+        return df
+    df = _normalize_trade_times(df)
+    mask = (df["time"] >= pd.Timestamp(start)) & (
+        df["time"] <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    )
+    return df.loc[mask].sort_values("time", ascending=False).reset_index(drop=True)
+
+
+def _build_excel_bytes(df: pd.DataFrame) -> bytes | None:
+    """Serialize a DataFrame to xlsx bytes; None when openpyxl is unavailable."""
+    try:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Trades")
+        return buffer.getvalue()
+    except Exception as e:
+        print(f"[TRADE HISTORY] Excel export unavailable: {e}")
+        return None
+
+
+def _ledger_bounds(df: pd.DataFrame) -> tuple[date, date] | None:
+    """Return the (min, max) execution dates present in the ledger, or None."""
+    if df is None or df.empty or "time" not in df.columns:
+        return None
+    times = pd.to_datetime(df["time"], errors="coerce", utc=True).dropna()
+    if times.empty:
+        return None
+    return times.min().date(), times.max().date()
+
+
+def _ensure_period_defaults(df: pd.DataFrame) -> None:
+    """Seed the period widget keys; default to the full ledger coverage."""
+    today = date.today()
+    default_start, default_end = today - timedelta(days=30), today
+    bounds = _ledger_bounds(df)
+    if bounds is not None:
+        default_start, default_end = bounds
+    st.session_state.setdefault("trade_hist_start", default_start)
+    st.session_state.setdefault("trade_hist_end", default_end)
+
+
+def _expand_period_to_ledger(df: pd.DataFrame) -> None:
+    """Widen the period to cover every operation just imported/updated."""
+    bounds = _ledger_bounds(df)
+    if bounds is not None:
+        st.session_state["trade_hist_start"] = bounds[0]
+        st.session_state["trade_hist_end"] = bounds[1]
+
+
+def _render_period_selector(df: pd.DataFrame) -> tuple[date, date]:
+    """Render the prominent period selector with quick presets.
+
+    Returns the selected ``(start_date, end_date)``. Preset/reset buttons are
+    rendered before the date inputs so they can safely update the widget keys.
+    """
+    st.subheader("🗓️ Periodo di analisi")
+    bounds = _ledger_bounds(df)
+    today = date.today()
+    if bounds is not None:
+        st.caption(
+            f"📦 Dati disponibili nel ledger: dal {bounds[0]:%d/%m/%Y} "
+            f"al {bounds[1]:%d/%m/%Y} ({len(df)} operazioni)."
+        )
+        all_start, all_end = bounds
+    else:
+        st.caption("📦 Ledger vuoto: importa un estratto per popolare lo storico.")
+        all_start, all_end = today - timedelta(days=30), today
+
+    def _set_period(new_start: date, new_end: date) -> None:
+        st.session_state["trade_hist_start"] = new_start
+        st.session_state["trade_hist_end"] = new_end
+
+    presets = st.columns(5)
+    if presets[0].button("Ultimo mese", use_container_width=True, key="ph_last_month"):
+        _set_period(today - timedelta(days=30), today)
+    if presets[1].button("Ultimi 3 mesi", use_container_width=True, key="ph_last_3m"):
+        _set_period(today - timedelta(days=90), today)
+    if presets[2].button(
+        "Anno corrente (YTD)", use_container_width=True, key="ph_ytd"
+    ):
+        _set_period(date(today.year, 1, 1), today)
+    if presets[3].button("Tutto lo storico", use_container_width=True, key="ph_all"):
+        _set_period(all_start, all_end)
+    if presets[4].button("↩️ Mostra tutto", use_container_width=True, key="ph_reset"):
+        _set_period(all_start, all_end)
+
+    date_col1, date_col2 = st.columns(2)
+    start_date = date_col1.date_input("Data inizio", key="trade_hist_start")
+    end_date = date_col2.date_input("Data fine", key="trade_hist_end")
+
+    if start_date > end_date:
+        st.error("❌ La data di inizio non può essere successiva alla data di fine.")
+        st.stop()
+    return start_date, end_date
+
+
+def _render_trade_stats(
+    stats: TradeStats, unrealized_pnl: float | None = None
+) -> None:
+    """Render the statistics bundle with KPI metrics and detail tables."""
+    st.markdown("**Riepilogo**")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Operazioni", stats.n_trades)
+    c2.metric("Simboli", stats.n_symbols)
+    c3.metric("Volume", f"{stats.total_volume:,.0f}")
+    c4.metric("Commissioni", f"{stats.total_commission:,.2f}")
+    if stats.first_date and stats.last_date:
+        st.caption(
+            f"Periodo coperto: {stats.first_date:%d/%m/%Y} → {stats.last_date:%d/%m/%Y}"
+        )
+
+    st.markdown("**P&L**")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("P&L realizzato", f"{stats.realized_pnl:+,.2f}")
+    p2.metric("P&L netto", f"{stats.net_pnl:+,.2f}")
+    p3.metric("Migliore operazione", f"{stats.best_trade:+,.2f}")
+    p4.metric("Peggiore operazione", f"{stats.worst_trade:+,.2f}")
+    if unrealized_pnl is not None:
+        st.metric(
+            "P&L non realizzato (posizioni aperte)",
+            f"{unrealized_pnl:+,.2f}",
+        )
+
+    st.markdown("**Win / Loss**")
+    w1, w2, w3, w4 = st.columns(4)
+    w1.metric("Win rate", f"{stats.win_rate:.1f}%")
+    w2.metric("Profittevoli", stats.n_wins)
+    w3.metric("In perdita", stats.n_losses)
+    w4.metric("Pari", stats.n_flat)
+    w5, w6, w7 = st.columns(3)
+    w5.metric("Profitto medio", f"{stats.avg_profit:+,.2f}")
+    w6.metric("Perdita media", f"{stats.avg_loss:+,.2f}")
+    w7.metric(
+        "Profit factor",
+        f"{stats.profit_factor:.2f}" if stats.profit_factor is not None else "n/a",
+    )
+    st.metric("P&L medio per trade", f"{stats.avg_pnl:+,.2f}")
+
+    st.markdown("**Long / Short (BOT / SLD)**")
+    long_short = pd.DataFrame(
+        [
+            {"side": "BOT (long)", "n_trade": stats.n_bot, "realized_pnl": stats.pnl_bot},
+            {"side": "SLD (short)", "n_trade": stats.n_sld, "realized_pnl": stats.pnl_sld},
+        ]
+    )
+    st.dataframe(long_short, use_container_width=True, hide_index=True)
+
+    if stats.by_symbol:
+        st.markdown("**Per simbolo**")
+        st.dataframe(
+            pd.DataFrame([item.model_dump() for item in stats.by_symbol]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if stats.by_month:
+        st.markdown("**P&L per mese**")
+        month_df = pd.DataFrame([item.model_dump() for item in stats.by_month])
+        st.bar_chart(month_df.set_index("period")["realized_pnl"])
+        st.dataframe(month_df, use_container_width=True, hide_index=True)
+
+    if stats.by_year:
+        st.markdown("**P&L per anno**")
+        st.dataframe(
+            pd.DataFrame([item.model_dump() for item in stats.by_year]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def _render_open_positions(df_ledger: pd.DataFrame) -> float | None:
+    """Render open positions with current market values; return unrealised P&L."""
+    st.subheader("📊 Posizioni aperte")
+    if compute_open_positions is None:
+        st.info("Modulo posizioni non disponibile (manca `positions.py`).")
+        return None
+
+    positions = compute_open_positions(df_ledger)
+    if not positions:
+        st.info(
+            "Nessuna posizione aperta: le quantità nette ricavate dal ledger sono "
+            "tutte a zero."
+        )
+        return None
+
+    prices = st.session_state.get("open_pos_prices", {})
+    sources = st.session_state.get("open_pos_sources", {})
+    col_btn, col_info = st.columns([1, 3])
+    refresh = col_btn.button(
+        "🔄 Aggiorna prezzi", use_container_width=True, key="open_pos_refresh"
+    )
+    ts = st.session_state.get("open_pos_ts")
+    col_info.caption(
+        "Prezzi azioni/ETF via **yfinance**; opzioni in best-effort dal option "
+        "chain (il prezzo opzione live affidabile richiede IBKR/market data)."
+        + (f" Ultimo aggiornamento: {ts}." if ts else "")
+    )
+
+    if refresh:
+        with st.spinner("📡 Recupero prezzi di mercato …"):
+            try:
+                prices, sources = fetch_market_prices(positions)
+                if conn.connected:
+                    try:
+                        overrides = 0
+                        for item in st.session_state.connector.get_positions():
+                            market_price = item.get("market_price")
+                            if not market_price:
+                                continue
+                            for position in positions:
+                                if (
+                                    position.symbol == item.get("symbol")
+                                    and position.sec_type.upper()
+                                    == str(item.get("sec_type", "")).upper()
+                                ):
+                                    prices[position.key] = float(market_price)
+                                    sources[position.key] = "IBKR"
+                                    overrides += 1
+                        if overrides:
+                            st.caption(f"🔌 {overrides} prezzi sovrascritti da IBKR.")
+                    except Exception as ib_err:
+                        st.warning(f"⚠️ Prezzi IBKR non disponibili: {ib_err}")
+                st.session_state["open_pos_prices"] = prices
+                st.session_state["open_pos_sources"] = sources
+                st.session_state["open_pos_ts"] = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                st.success(
+                    f"✅ Prezzi aggiornati per {len(prices)}/{len(positions)} posizioni."
+                )
+            except Exception as e:
+                st.error(f"❌ Errore nel recupero prezzi: {e}")
+                print(f"[ERROR] Positions prices: {type(e).__name__}: {e}")
+
+    priced = apply_market_prices(positions, prices, sources)
+    rows = []
+    for position in priced:
+        contract = (
+            f"{position.expiry}/{position.strike:g}{position.right}"
+            if position.sec_type.upper() == "OPT"
+            else ""
+        )
+
+        def _fmt(value, digits):
+            return round(value, digits) if value is not None else "n/d"
+
+        rows.append(
+            {
+                "Symbol": position.symbol,
+                "Tipo": position.sec_type,
+                "Contratto": contract,
+                "Qty": position.quantity,
+                "Prezzo medio": _fmt(position.avg_cost, 4),
+                "Prezzo mercato": _fmt(position.market_price, 4),
+                "Valore mercato": _fmt(position.market_value, 2),
+                "P&L non real.": _fmt(position.unrealized_pnl, 2),
+                "P&L %": _fmt(position.unrealized_pnl_pct, 2),
+                "Fonte": position.price_source or "-",
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    unrealized = total_unrealized_pnl(priced)
+    realized_ledger = float(
+        pd.to_numeric(
+            df_ledger.get("realized_pnl", pd.Series(dtype=float)), errors="coerce"
+        )
+        .fillna(0.0)
+        .sum()
+    )
+    if unrealized is not None:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("P&L non realizzato (aperte)", f"{unrealized:+,.2f}")
+        m2.metric("P&L realizzato (ledger)", f"{realized_ledger:+,.2f}")
+        m3.metric("Totale portafoglio", f"{realized_ledger + unrealized:+,.2f}")
+    else:
+        st.caption("P&L non realizzato non ancora calcolato: premi **Aggiorna prezzi**.")
+    return unrealized
+
+
+def _render_coach_config_help() -> None:
+    """Explain how to configure the OpenAI-compatible coach endpoint."""
+    with st.expander("ℹ️ Come configurare il Trading Coach"):
+        st.markdown(
+            "Il coach usa un endpoint **OpenAI-compatibile** configurato da `.env`.\n\n"
+            "**Opzione minima** — basta una chiave già presente: viene scelta "
+            "automaticamente nell'ordine `GROQ_API_KEY` → `OPENROUTER_API_KEY` → "
+            "`GOOGLE_API_KEY` → `OPENCODE_GO_API_KEY`.\n\n"
+            "**Configurazione esplicita** (override):\n"
+            "- `TRADING_COACH_PROVIDER` = `groq` | `openrouter` | `google` | "
+            "`opencode` | `custom`\n"
+            "- `TRADING_COACH_MODEL` (es. `llama-3.3-70b-versatile`)\n"
+            "- `TRADING_COACH_API_KEY`\n"
+            "- `TRADING_COACH_BASE_URL` (es. `https://api.groq.com/openai/v1`)\n\n"
+            "Il profilo è salvato in `trading_profile.md`, la conversazione in "
+            "`coach_history.json`."
+        )
+
+
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
 # ── IBKR Gateway Launcher ──
@@ -594,7 +993,14 @@ if OpencodeDebate:
 # ─── Navigation & Modes ─────────────────────────────────────────────────────
 st.sidebar.markdown("---")
 view_mode = st.sidebar.radio(
-    "Navigation", ["🔍 Trading Dashboard", "🎡 Wheel Strategy Scanner", "📊 Earnings Backtester"]
+    "Navigation",
+    [
+        "🔍 Trading Dashboard",
+        "🎡 Wheel Strategy Scanner",
+        "📊 Earnings Backtester",
+        "📜 Trade History",
+        "🤖 Trading Coach",
+    ],
 )
 
 if view_mode == "🎡 Wheel Strategy Scanner":
@@ -987,6 +1393,385 @@ elif view_mode == "📊 Earnings Backtester":
         # Detail Table
         with st.expander("📋 Detailed Per-Earnings Results", expanded=False):
             st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+    st.stop()
+
+elif view_mode == "📜 Trade History":
+    st.title("📜 Trade History")
+    st.markdown(
+        "Storico delle operazioni eseguite su IBKR/MEXEM. Scegli un intervallo "
+        "temporale e scarica i trade filtrati in **CSV** o **Excel**.\n\n"
+        "Puoi popolare lo storico in tre modi:\n"
+        "- **🔄 Aggiorna giorno corrente (IBKR)** — API TWS (`reqExecutions`), "
+        "espone *solo* le esecuzioni di oggi.\n"
+        "- **📥 Scarica storico da Flex** — **Flex Web Service** automatico per i "
+        "giorni precedenti (richiede `IBKR_FLEX_TOKEN` + `IBKR_FLEX_QUERY_ID`).\n"
+        "- **📤 Import manuale da file** — carica l'estratto Flex Query esportato "
+        "da MEXEM/IBKR (XML o CSV), senza token.\n\n"
+        "I dati importati vengono deduplicati per `exec_id` e accumulati in "
+        "`trade_history.csv`."
+    )
+
+    flex_cfg = FlexConfig.from_env() if FlexConfig is not None else None
+    today = date.today()
+
+    df_ledger = _load_trade_history()
+    _ensure_period_defaults(df_ledger)
+    period_start = st.session_state.get("trade_hist_start")
+    period_end = st.session_state.get("trade_hist_end")
+
+    fetch_col1, fetch_col2 = st.columns(2)
+    with fetch_col1:
+        fetch_hist = st.button(
+            "🔄 Aggiorna giorno corrente (IBKR)", use_container_width=True
+        )
+    with fetch_col2:
+        fetch_flex = st.button(
+            "📥 Scarica storico da Flex",
+            use_container_width=True,
+            disabled=flex_cfg is None,
+        )
+
+    if fetch_hist:
+        if not conn.connected:
+            st.warning(
+                "⚠️ Non connesso a IBKR. Collegati dalla sidebar prima di "
+                "aggiornare lo storico."
+            )
+        else:
+            with st.spinner("📡 Recupero operazioni eseguite …"):
+                try:
+                    records = st.session_state.connector.get_executions()
+                    if records:
+                        df_ledger = _merge_trade_history(df_ledger, records)
+                        _save_trade_history(df_ledger)
+                        _expand_period_to_ledger(df_ledger)
+                        st.success(
+                            f"✅ {len(records)} operazioni del giorno corrente "
+                            "recuperate da IBKR."
+                        )
+                    else:
+                        st.info(
+                            "ℹ️ IBKR non ha restituito esecuzioni per il giorno "
+                            "corrente. L'API TWS (`reqExecutions`) espone **solo "
+                            "le esecuzioni di oggi**: per i giorni precedenti usa "
+                            "il **Flex Web Service**."
+                        )
+                except Exception as e:
+                    st.error(f"❌ Errore nel recupero delle operazioni: {e}")
+                    print(f"[ERROR] Trade history fetch: {type(e).__name__}: {e}")
+
+    if fetch_flex:
+        if flex_cfg is None:
+            st.warning(
+                "⚠️ Flex Web Service non configurato. Imposta "
+                "`IBKR_FLEX_TOKEN` e `IBKR_FLEX_QUERY_ID` nel file `.env`."
+            )
+        else:
+            with st.spinner("📡 Download dello statement Flex in corso …"):
+                try:
+                    records = get_flex_executions(flex_cfg, period_start, period_end)
+                    if records:
+                        df_ledger = _merge_trade_history(df_ledger, records)
+                        _save_trade_history(df_ledger)
+                        _expand_period_to_ledger(df_ledger)
+                        st.success(
+                            f"✅ {len(records)} operazioni recuperate dal Flex "
+                            f"Web Service ({period_start:%d/%m/%Y}–{period_end:%d/%m/%Y})."
+                        )
+                    else:
+                        st.info(
+                            "ℹ️ Il Flex Web Service non ha restituito operazioni "
+                            "nel periodo selezionato."
+                        )
+                except Exception as e:
+                    st.error(f"❌ Errore nel download Flex: {e}")
+                    print(f"[ERROR] Flex fetch: {type(e).__name__}: {e}")
+
+    st.divider()
+    st.markdown("#### 📤 Import manuale da file Flex")
+    st.caption(
+        "Esporta l'estratto da MEXEM/IBKR (Client Portal → Performance & Reports "
+        "→ Flex Queries → Run) e caricalo qui. Formato consigliato: **XML** "
+        "(root `FlexQueryResponse`); anche il **CSV** è supportato in best-effort."
+    )
+    uploaded = st.file_uploader(
+        "File estratto Flex (.xml o .csv)",
+        type=["xml", "csv"],
+        key="trade_hist_upload",
+        help="Il file viene letto localmente, non viene inviato a nessun servizio.",
+    )
+    import_clicked = st.button(
+        "📥 Importa operazioni dal file",
+        disabled=uploaded is None or parse_flex_statement is None,
+        use_container_width=True,
+        key="trade_hist_import_btn",
+    )
+    if import_clicked and uploaded is not None:
+        try:
+            raw = uploaded.getvalue()
+            text = (
+                raw.decode("utf-8-sig", errors="replace")
+                if isinstance(raw, (bytes, bytearray))
+                else str(raw)
+            )
+            records = [
+                execution.model_dump()
+                for execution in parse_flex_statement(text)
+            ]
+            if not records:
+                st.warning("⚠️ Nessuna operazione trovata nel file caricato.")
+            else:
+                before = len(df_ledger)
+                df_ledger = _merge_trade_history(df_ledger, records)
+                _save_trade_history(df_ledger)
+                _expand_period_to_ledger(df_ledger)
+                st.success(
+                    f"✅ {len(records)} operazioni importate dal file "
+                    f"({len(df_ledger) - before} nuove, "
+                    f"{len(df_ledger)} totali nel ledger)."
+                )
+        except Exception as e:
+            st.error(f"❌ Impossibile leggere l'estratto Flex: {e}")
+            print(f"[ERROR] Flex upload: {type(e).__name__}: {e}")
+
+    if flex_cfg is None:
+        st.caption(
+            "🔐 **Modalità automatica** (Flex Web Service) non configurata: "
+            "aggiungi `IBKR_FLEX_TOKEN` e `IBKR_FLEX_QUERY_ID` al file `.env` "
+            "per abilitare **Scarica storico da Flex**. In alternativa usa "
+            "l'import manuale qui sopra, che non richiede token."
+        )
+
+    st.divider()
+    start_date, end_date = _render_period_selector(df_ledger)
+
+    df_filtered = _filter_trade_history(df_ledger, start_date, end_date)
+
+    if df_filtered.empty:
+        st.info(
+            f"ℹ️ Nessuna operazione eseguita tra il {start_date:%d/%m/%Y} "
+            f"e il {end_date:%d/%m/%Y}."
+        )
+    else:
+        st.subheader(
+            f"📋 {len(df_filtered)} operazioni dal {start_date:%d/%m/%Y} "
+            f"al {end_date:%d/%m/%Y}"
+        )
+
+        sides = df_filtered.get("side", pd.Series(dtype=str)).astype(str).str.upper()
+        commissions = pd.to_numeric(
+            df_filtered.get("commission", pd.Series(dtype=float)), errors="coerce"
+        ).fillna(0.0)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🟢 Buy (BOT)", int((sides == "BOT").sum()))
+        m2.metric("🔴 Sell (SLD)", int((sides == "SLD").sum()))
+        m3.metric("💸 Commissioni", f"{commissions.sum():,.2f}")
+
+        display_cols = [c for c in TRADE_HISTORY_COLUMNS if c in df_filtered.columns]
+        df_display = df_filtered[display_cols].copy()
+        if "time" in df_display.columns:
+            df_display["time"] = df_display["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _range = f"{start_date:%Y%m%d}_{end_date:%Y%m%d}"
+        csv_data = df_filtered.to_csv(index=False).encode("utf-8")
+        excel_bytes = _build_excel_bytes(df_filtered)
+
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button(
+                label="⬇️ Download CSV",
+                data=csv_data,
+                file_name=f"ibkr_trades_{_range}_{_ts}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                icon="📥",
+            )
+        with dl_col2:
+            if excel_bytes is not None:
+                st.download_button(
+                    label="⬇️ Download Excel",
+                    data=excel_bytes,
+                    file_name=f"ibkr_trades_{_range}_{_ts}.xlsx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet"
+                    ),
+                    use_container_width=True,
+                    icon="📥",
+                )
+            else:
+                st.caption("Excel non disponibile (installa `openpyxl`).")
+
+    st.divider()
+    unrealized_open = _render_open_positions(df_ledger)
+
+    st.divider()
+    st.subheader("📈 Statistiche")
+    if compute_trade_stats is None:
+        st.info("Modulo statistiche non disponibile (manca `trade_stats.py`).")
+    elif df_ledger.empty:
+        st.info(
+            "Importa prima un estratto Flex (o aggiorna da IBKR) per vedere le "
+            "statistiche."
+        )
+    else:
+        stats_scope = st.radio(
+            "Ambito statistiche",
+            ["Periodo selezionato", "Totale complessivo"],
+            horizontal=True,
+            key="trade_stats_scope",
+        )
+        stats_df = df_filtered if stats_scope == "Periodo selezionato" else df_ledger
+        if stats_df.empty:
+            st.info("Nessuna operazione nell'ambito selezionato.")
+        else:
+            _render_trade_stats(compute_trade_stats(stats_df), unrealized_open)
+
+    st.stop()
+
+# ─── Trading Coach ──────────────────────────────────────────────────────────
+
+elif view_mode == "🤖 Trading Coach":
+    st.title("🤖 Trading Coach")
+    st.markdown(
+        "Parla con l'AI del tuo modo di fare trading: descrivi regole, criteri ed "
+        "errori da evitare. Il coach fa domande, struttura il profilo e lo salva "
+        "in `trading_profile.md`."
+    )
+
+    coach_cfg = CoachConfig.from_env() if CoachConfig is not None else None
+    if coach_cfg is None:
+        st.warning(
+            "⚠️ Trading Coach non configurato: nessun endpoint LLM disponibile. "
+            "Aggiungi una API key al file `.env`."
+        )
+        _render_coach_config_help()
+        st.stop()
+
+    coach = TradingCoach(coach_cfg, base_dir=APP_DIR)
+    st.caption(f"Provider: `{coach_cfg.provider}` · Modello: `{coach_cfg.model}`")
+
+    tab_chat, tab_profile = st.tabs(["💬 Chat", "📄 Profilo"])
+
+    with tab_chat:
+        for message in coach.load_history():
+            role = message.get("role", "assistant")
+            with st.chat_message("user" if role == "user" else "assistant"):
+                st.markdown(message.get("content", ""))
+
+        prompt = st.chat_input(
+            "Descrivi una tua regola, un criterio, un errore da evitare…"
+        )
+        if prompt:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.spinner("🤔 Il coach sta rispondendo …"):
+                try:
+                    answer = coach.reply(prompt)
+                    with st.chat_message("assistant"):
+                        st.markdown(answer)
+                except Exception as e:
+                    st.error(f"❌ Errore API del coach: {e}")
+                    print(f"[ERROR] Coach reply: {type(e).__name__}: {e}")
+
+        st.divider()
+        st.markdown("#### 🔎 Derivazione automatica dallo storico")
+        df_coach = _load_trade_history()
+        if df_coach.empty:
+            st.caption(
+                "Nessuna operazione in `trade_history.csv`: importa prima un "
+                "estratto Flex dalla pagina Trade History."
+            )
+        else:
+            if not coach.load_profile().strip():
+                st.info(
+                    "💡 Non hai ancora un profilo salvato: puoi farlo derivare "
+                    "automaticamente dal tuo storico operazioni qui sotto."
+                )
+            st.caption(
+                f"{len(df_coach)} operazioni nel ledger. L'AI analizza un "
+                "riassunto statistico + un campione (non l'intero file)."
+            )
+            if st.button(
+                "🔎 Analizza il mio storico",
+                key="coach_derive",
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner("🧠 Il coach sta analizzando lo storico …"):
+                        open_pos = (
+                            compute_open_positions(df_coach)
+                            if compute_open_positions is not None
+                            else None
+                        )
+                        profile, summary = coach.derive_profile_from_ledger(
+                            df_coach, open_pos
+                        )
+                    st.success(
+                        "✅ Profilo derivato dallo storico e salvato in "
+                        "`trading_profile.md`."
+                    )
+                    with st.expander("📄 Profilo derivato", expanded=True):
+                        st.markdown(profile)
+                    st.caption(
+                        f"Riassunto inviato: {summary.get('n_trades')} trade · "
+                        f"win rate {summary.get('win_rate_pct')}% · "
+                        f"profit factor {summary.get('profit_factor')}."
+                    )
+                except Exception as e:
+                    st.error(f"❌ Errore nella derivazione del profilo: {e}")
+                    print(f"[ERROR] Coach derive: {type(e).__name__}: {e}")
+
+        action1, action2, action3 = st.columns(3)
+        if action1.button(
+            "📝 Aggiorna profilo dalla chat",
+            use_container_width=True,
+            key="coach_sync",
+        ):
+            try:
+                with st.spinner("🧠 Sintesi del profilo …"):
+                    coach.synthesize_profile()
+                st.success("✅ Profilo aggiornato in `trading_profile.md`.")
+            except Exception as e:
+                st.error(f"❌ Errore nella sintesi del profilo: {e}")
+        if action2.button(
+            "🗑️ Azzera conversazione",
+            use_container_width=True,
+            key="coach_clear_chat",
+        ):
+            coach.clear_history()
+            st.rerun()
+        if action3.button(
+            "🗑️ Azzera profilo",
+            use_container_width=True,
+            key="coach_clear_profile",
+        ):
+            coach.clear_profile()
+            st.rerun()
+
+    with tab_profile:
+        current = coach.load_profile()
+        if current.strip():
+            st.markdown(current)
+        else:
+            st.info(
+                "Nessun profilo salvato: parla con il coach e premi "
+                "**Aggiorna profilo dalla chat**."
+            )
+        st.markdown("**Revisiona / modifica il profilo**")
+        edited = st.text_area(
+            "Profilo trading (Markdown)",
+            value=current,
+            height=320,
+            key="coach_profile_edit",
+        )
+        if st.button("💾 Salva profilo", key="coach_save_profile"):
+            coach.save_profile(edited)
+            st.success("✅ Profilo salvato.")
+            st.rerun()
 
     st.stop()
 
